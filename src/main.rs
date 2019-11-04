@@ -17,7 +17,7 @@ fn run() -> cli::error::Result<()> {
 		executable_name: "hopr-polkadot",
 		author: "hoprnet",
 		description: "hopr-polkadot",
-		support_url: "support.anonymous.an",
+		support_url: "hopr.network",
 	};
 	cli::run(::std::env::args(), cli::Exit, version)
 }

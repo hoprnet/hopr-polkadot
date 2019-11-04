@@ -190,7 +190,6 @@ impl sudo::Trait for Runtime {
 /// Used for the module hopr in `./hopr.rs`
 impl hopr::Trait for Runtime {
 	type Event = Event;
-	type Currency = Currency;
 }
 
 construct_runtime!(

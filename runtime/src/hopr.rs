@@ -12,15 +12,16 @@ use support::{decl_module, decl_storage, decl_event, ensure, StorageMap, dispatc
 use runtime_primitives::traits::{Hash, Verify, CheckedAdd, CheckedSub, As};
 use system::{ensure_signed};
 use parity_codec::{Encode, Decode};
-
 use primitives::{sr25519::{Public, Signature}};
+
+/// Length of the pending_window in seconds
+const PENDING_WINDOW: u64 = 1 * 60;
 
 #[derive(Clone, PartialEq, Encode, Decode)]
 #[cfg_attr(feature = "std", derive(Debug))]
-struct ChannelBalance<Balance> {
+pub struct ChannelBalance<Balance> {
 	balance: Balance,
 	balance_a: Balance,
-	index: u16
 }
 
 #[derive(Clone, PartialEq, Encode, Decode)]
@@ -38,16 +39,17 @@ impl<Balance, Moment> Default for Channel<Balance, Moment> {
 
 #[derive(Encode, Decode, Default, Clone, PartialEq)]
 #[cfg_attr(feature = "std", derive(Debug))]
-pub struct State<Balance, Hash> {
+pub struct State<Hash> {
 	// number of open channels
 	// Note: the smart contract doesn't know the actual
 	//       channels but it knows how many open ones
 	//       there are.
-	openChannels: u16,
+	// openChannels: u16,
 	secret: Hash
 }
 
 pub type ChannelId<T> = <T as system::Trait>::Hash;
+pub type PreImage<T> = <T as system::Trait>::Hash;
 
 /// The module's configuration trait.
 pub trait Trait: system::Trait + timestamp::Trait + balances::Trait {
@@ -58,7 +60,7 @@ pub trait Trait: system::Trait + timestamp::Trait + balances::Trait {
 decl_storage! {
 	trait Store for Module<T: Trait> as hopr {
 		Channels get(channels): map ChannelId<T> => Channel<T::Balance, T::Moment>;
-		States get(state_of): map T::AccountId => State<T::Balance, T::Hash>;
+		States get(state): map T::AccountId => State<T::Hash>;
 		Nonces get(nonce_exists): map T::Hash => bool;
 		AccountIdMap get(pubkey): map T::AccountId => Public;
 	}
@@ -69,6 +71,7 @@ decl_module! {
 	pub struct Module<T: Trait> for enum Call where origin: T::Origin {
 		fn deposit_event<T>() = default;
 
+		/// Initialises a payment channel between two parties.
 		pub fn create(origin, funds: T::Balance, counterparty: T::AccountId) -> Result {
 			// ==== Verification ================================
 			let sender = ensure_signed(origin)?;
@@ -85,13 +88,11 @@ decl_module! {
 						channel = Channel::Funded(ChannelBalance {
 							balance: funds,
 							balance_a: funds,
-							index: 0
 						});
 					} else {
 						channel = Channel::Funded(ChannelBalance {
 							balance: funds,
 							balance_a: <T::Balance as As<u64>>::sa(0),
-							index: 0
 						});
 					}
 				},
@@ -100,27 +101,26 @@ decl_module! {
 						channel = Channel::Funded(ChannelBalance {
 							balance: channel_balance.balance.checked_add(&funds).ok_or("integer error")?,
 							balance_a: channel_balance.balance_a.checked_add(&funds).ok_or("integer error")?,
-							index: channel_balance.index
 						});
 					} else {
 						channel = Channel::Funded(ChannelBalance {
 							balance: channel_balance.balance.checked_add(&funds).ok_or("integer error")?,
 							balance_a: channel_balance.balance_a.checked_sub(&funds).ok_or("integer error")?,
-							index: channel_balance.index
 						});
 					}
 				},
-				_ => panic!("Channel is cannot be created twice.")
+				_ => panic!("Channel is cannot be created twice."),
 			}
 
 			// ==== State change ================================
 			<Channels<T>>::insert(channel_id, channel);
-			<balances::Module<T> as ReservableCurrency<<T as system::Trait>::AccountId>>::reserve(&sender, funds);
+			<balances::Module<T> as ReservableCurrency<<T as system::Trait>::AccountId>>::reserve(&sender, funds)?;
 			
 			Ok(())
 		}
 
-		pub fn setActive(origin, counterparty: T::AccountId, signature: Signature) -> Result {
+		/// Turns a previously funded channel into an active one.
+		pub fn set_active(origin, counterparty: T::AccountId, signature: Signature) -> Result {
 			// ==== Verification ================================
 			let sender = ensure_signed(origin)?;
 
@@ -132,25 +132,30 @@ decl_module! {
 
 			let counterparty_pubkey = Self::pubkey(counterparty);
 
-			ensure!(Signature::verify(&signature, (channel).using_encoded(<T as system::Trait>::Hashing::hash).as_ref(), &counterparty_pubkey), "Invalid signature.");
+			let channel_balance: Option<ChannelBalance<T::Balance>>;
+
+			ensure!(Signature::verify(&signature, channel.encode().as_slice(), &counterparty_pubkey), "Invalid signature.");
 		
-			match channel {
-				Channel::Funded(channel_balance) => {
-					channel = Channel::Active(channel_balance);
-				}
-				_ => panic!("Channel does not exist and/or its state does not fit.")
+			if let Channel::Funded(_channel_balance) = channel {
+				channel_balance = Some(_channel_balance.clone());
+				channel = Channel::Active(_channel_balance);
+			} else {
+				panic!("Channel does not exist and/or its state does not fit.")
 			}
 
 			// ==== State change ================================
-			<Channels<T>>::insert(channel_id, channel);
 			Self::test_and_set_nonce(<T as system::Trait>::Hashing::hash(signature.as_ref()))?;
 
-			Self::deposit_event(RawEvent::OpenedChannel(channel_id, channel.channelbalance, balance_a));
+			<Channels<T>>::insert(channel_id, channel);
+
+			Self::deposit_event(RawEvent::Opened(channel_id, channel_balance.clone().unwrap().balance, channel_balance.unwrap().balance_a));
 
 			Ok(())
 		}
 
-		pub fn create_funded(origin, nonce: u32, counterparty: T::AccountId, signature: Signature, funds: T::Balance, index: u64) -> Result {
+		/// Initialise a channel that is funded by both sides and turn it immediately into
+		/// an active one.
+		pub fn create_funded(origin, counterparty: T::AccountId, signature: Signature, funds: T::Balance) -> Result {
 			// ==== Verification ================================
 			let sender = ensure_signed(origin)?;
 
@@ -159,23 +164,22 @@ decl_module! {
 			let channel_balance = ChannelBalance {
 				balance: funds.checked_add(&funds).ok_or("integer error")?,
 				balance_a: funds,
-				index: 0
 			};
 
-			let mut channel = Channel::Funded(channel_balance);
+			let mut channel = Channel::Funded(channel_balance.clone());
 
-			let counterparty_pubkey: Public = Self::pubkey(counterparty);
+			let counterparty_pubkey: Public = Self::pubkey(&counterparty);
 
 			let channel_id: ChannelId<T> = Self::get_id(&counterparty, &sender);
 
 			ensure!(!<Channels<T>>::exists(&channel_id), "Channel must not exist.");
 
-			ensure!(Signature::verify(&signature, (channel).using_encoded(<T as system::Trait>::Hashing::hash).as_ref(), &counterparty_pubkey), "Signature must be valid.");
+			ensure!(Signature::verify(&signature, channel.encode().as_slice(), &counterparty_pubkey), "Signature must be valid.");
 
 			ensure!(<balances::Module<T> as ReservableCurrency<<T as system::Trait>::AccountId>>::can_reserve(&sender, funds), "User does have not enough funds.");
 			ensure!(<balances::Module<T> as ReservableCurrency<<T as system::Trait>::AccountId>>::can_reserve(&counterparty, funds), "Counterparty does not have enough funds.");
 
-			channel = Channel::Active(channel_balance);
+			channel = Channel::Active(channel_balance.clone());
 
 			// ==== State change ================================
 			Self::test_and_set_nonce(<T as system::Trait>::Hashing::hash(signature.as_ref()))?;
@@ -185,17 +189,123 @@ decl_module! {
 
 			<Channels<T>>::insert(channel_id, channel);
 
-			Self::deposit_event(RawEvent::OpenedChannel(channel_id, channel_balance.balance, channel_balance.balance_a));
+			Self::deposit_event(RawEvent::Opened(channel_id, channel_balance.balance, channel_balance.balance_a));
 
 			Ok(())
 		}
 
-		pub fn setSecret(origin, hash: T::Hash) {
-			<States<T>>::update 
+		/// Resets the stored on-chain secret.
+		pub fn set_secret(origin, hash: T::Hash) {
+			// ==== Verification ================================
+			let sender = ensure_signed(origin)?;
+
+			// ==== State change ================================
+			<States<T>>::mutate(&sender, |state| {
+				state.secret = hash;
+			})
 		}
 
-		pub fn withdraw(origin, nonce: u32, index: u16, balance: T::Balance, balanceA: T::Balance, signature: Signature) -> Result {
+		pub fn redeem_ticket(origin, signature: Signature, counterparty: T::AccountId, pre_image: PreImage<T>, s_a: PreImage<T>, s_b: PreImage<T>, amount: T::Balance, win_prob: T::Hash) -> Result {
+			// ==== Verification ================================
+			let sender = ensure_signed(origin)?;
+
+			ensure!(<States<T>>::exists(&sender), "Sender must have set an on-chain secret.");
+			ensure!(<T as system::Trait>::Hashing::hash(pre_image.as_ref()) == Self::state(&sender).secret, "Given value is not a pre-image of the stored on-chain secret");
+
+			ensure!(<AccountIdMap<T>>::exists(&counterparty), "We do not know the public key of the counterparty.");
+
+			let counterparty_pubkey = Self::pubkey(&counterparty);
+
+			let channel_id = Self::get_id(&sender, &counterparty);
+			let channel = Self::channels(channel_id);
+			let mut _channel_balance: Option<ChannelBalance<T::Balance>> = None;
+
+			match channel.clone() {
+				Channel::Active(__channel_balance) => {
+					_channel_balance = Some(__channel_balance);
+				},
+				Channel::PendingSettlement(__channel_balance, timestamp) => {
+					if timestamp::Module::<T>::now() > timestamp {
+						panic!("Ticket redemption must have happened before end of pending window.")
+					}
+					_channel_balance = Some(__channel_balance);
+				},
+				_ => panic!("Channel does not exist and/or its state does not fit.")
+			}
+
+			let mut updated_balance = _channel_balance.unwrap();
+
+			if Self::is_party_a(&sender, &counterparty) {
+				ensure!(updated_balance.balance_a.checked_add(&amount).ok_or("Integer error.")? <= updated_balance.balance, "Transferred funds must not exceed channel balance.")
+			} else {
+				ensure!(updated_balance.balance_a.checked_sub(&amount).ok_or("Integer error.")? >= <<T as balances::Trait>::Balance as As<u64>>::sa(0), "Transferred funds must not exceed channel balance.")
+			}
+
+			let hashed_s_a = <T as system::Trait>::Hashing::hash(s_a.as_ref());
+			let hashed_s_b = <T as system::Trait>::Hashing::hash(s_b.as_ref());
+
+			let challenge = (hashed_s_a, hashed_s_b).using_encoded(<T as system::Trait>::Hashing::hash);
+
+			let ticket = (challenge, pre_image, amount, win_prob);
+			let hashed_ticket = ticket.using_encoded(<T as system::Trait>::Hashing::hash);
+
+			ensure!(Self::cmp_hash(&hashed_ticket, &win_prob), "Ticket must be a win.");
+
+			ensure!(Verify::verify(&signature, ticket.encode().as_slice(), &counterparty_pubkey), "Signature must be valid.");
+
+			// ==== Prepare state change=========================
+			if Self::is_party_a(&sender, &counterparty) {
+				updated_balance.balance_a = updated_balance.balance_a.checked_add(&amount).ok_or("Integer error.")?;
+			} else {
+				updated_balance.balance_a = updated_balance.balance_a.checked_sub(&amount).ok_or("Integer error.")?; 
+			}
+
+			// ==== State change ================================
+			Self::test_and_set_nonce(<T as system::Trait>::Hashing::hash(signature.as_ref()))?;
+			<States<T>>::mutate(&sender, |state| {
+				state.secret = pre_image;
+			});
+
+			match channel {
+				Channel::Active(_) => <Channels<T>>::insert(&channel_id, Channel::Active(updated_balance)),
+				Channel::PendingSettlement(_, timestamp) => <Channels<T>>::insert(&channel_id, Channel::PendingSettlement(updated_balance, timestamp)),
+				_ => panic!("Channel does not exist and/or its state does not fit.")
+			};
+
 			Ok(())
+		}
+
+		pub fn initiate_recovery() {
+			// TODO
+		}
+
+		pub fn initiate_settlement(origin, counterparty: T::AccountId) {
+			// ==== Verification ================================
+			let sender = ensure_signed(origin)?;
+
+			ensure!(<AccountIdMap<T>>::exists(&counterparty), "We do not know the public key of the counterparty.");
+
+			let channel_id = Self::get_id(&sender, &counterparty);
+
+			let channel = Self::channels(channel_id);
+			let mut _channel_balance: Option<ChannelBalance<T::Balance>> = None;
+
+			match channel.clone() {
+				Channel::Active(__channel_balance) => {
+					_channel_balance = Some(__channel_balance);
+				},
+				_ => panic!("Channel does not exist and/or its state does not fit.")
+			}
+
+			// ==== State change ================================
+			let end_of_pending_window = timestamp::Module::<T>::now().checked_add(&<T::Moment as As<u64>>::sa(PENDING_WINDOW)).ok_or("Integer overflow")?;
+			<Channels<T>>::insert(channel_id, Channel::PendingSettlement(_channel_balance.clone().unwrap(), end_of_pending_window));
+
+			Self::deposit_event(RawEvent::InitiatedSettlement(channel_id, _channel_balance.unwrap().balance));
+		}
+
+		pub fn withdraw() {
+			// TODO
 		}
 	}
 }
@@ -205,9 +315,9 @@ decl_event!(
 		<T as system::Trait>::AccountId,
 		<T as system::Trait>::Hash,
 		<T as balances::Trait>::Balance {
-		OpenedChannel(Hash, Balance, Balance),
-		ClosedChannel(Hash, u16, Balance),
-		OpenedChannelFor(AccountId, AccountId, Balance, Balance),
+		Opened(Hash, Balance, Balance),
+		InitiatedSettlement(Hash, Balance),
+		OpenedFor(AccountId, AccountId, Balance, Balance),
 	}
 );
 
@@ -230,6 +340,10 @@ impl<T: Trait> Module<T> {
 		} else {
 			(b, a).using_encoded(<T as system::Trait>::Hashing::hash)
 		}
+	}
+
+	fn cmp_hash(first_hash: &T::Hash, second_hash: &T::Hash) -> bool {
+		*(first_hash.as_ref()) < *(second_hash.as_ref())
 	}
 }
 

@@ -39,13 +39,14 @@ impl<Balance, Moment> Default for Channel<Balance, Moment> {
 
 #[derive(Encode, Decode, Default, Clone, PartialEq)]
 #[cfg_attr(feature = "std", derive(Debug))]
-pub struct State<Hash> {
+pub struct State<Hash, Public> {
 	// number of open channels
 	// Note: the smart contract doesn't know the actual
 	//       channels but it knows how many open ones
 	//       there are.
 	// openChannels: u16,
-	secret: Hash
+	secret: Hash,
+	pubkey: Public
 }
 
 pub type ChannelId<T> = <T as system::Trait>::Hash;
@@ -55,14 +56,14 @@ pub type PreImage<T> = <T as system::Trait>::Hash;
 pub trait Trait: system::Trait + timestamp::Trait + balances::Trait {
 	/// The overarching event type.
 	type Event: From<Event<Self>> + Into<<Self as system::Trait>::Event>;
+	// type AccountId: AsRef<[u8; 32]>;
 }
 
 decl_storage! {
 	trait Store for Module<T: Trait> as hopr {
 		Channels get(channels): map ChannelId<T> => Channel<T::Balance, T::Moment>;
-		States get(state): map T::AccountId => State<T::Hash>;
+		States get(state): map T::AccountId => State<T::Hash, Public>;
 		Nonces get(nonce_exists): map T::Hash => bool;
-		AccountIdMap get(pubkey): map T::AccountId => Public;
 	}
 }
 
@@ -124,13 +125,13 @@ decl_module! {
 			// ==== Verification ================================
 			let sender = ensure_signed(origin)?;
 
-			ensure!(<AccountIdMap<T>>::exists(&counterparty), "We do not know the public key of the counterparty.");
+			ensure!(<States<T>>::exists(&counterparty), "We do not know the public key of the counterparty.");
 			
 			let channel_id = Self::get_id(&sender, &counterparty);
 
 			let mut channel = Self::channels(&channel_id);
 
-			let counterparty_pubkey = Self::pubkey(counterparty);
+			let counterparty_pubkey = Self::state(counterparty).pubkey;
 
 			let channel_balance: Option<ChannelBalance<T::Balance>>;
 
@@ -159,7 +160,7 @@ decl_module! {
 			// ==== Verification ================================
 			let sender = ensure_signed(origin)?;
 
-			ensure!(<AccountIdMap<T>>::exists(&counterparty), "We do not know the public key of the counterparty.");
+			ensure!(<States<T>>::exists(&counterparty), "We do not know the public key of the counterparty.");
 
 			let channel_balance = ChannelBalance {
 				balance: funds.checked_add(&funds).ok_or("integer error")?,
@@ -168,7 +169,7 @@ decl_module! {
 
 			let mut channel = Channel::Funded(channel_balance.clone());
 
-			let counterparty_pubkey: Public = Self::pubkey(&counterparty);
+			let counterparty_pubkey: Public = Self::state(&counterparty).pubkey;
 
 			let channel_id: ChannelId<T> = Self::get_id(&counterparty, &sender);
 
@@ -195,14 +196,35 @@ decl_module! {
 		}
 
 		/// Resets the stored on-chain secret.
-		pub fn set_secret(origin, hash: T::Hash) {
+		pub fn set_secret(origin, hash: T::Hash) -> Result {
 			// ==== Verification ================================
 			let sender = ensure_signed(origin)?;
+
+			ensure!(<States<T>>::exists(&sender), "Call init() before setting a new on-chain secret.");
+
+			ensure!(Self::state(&sender).secret != hash, "New and old hash must not be the same.");
 
 			// ==== State change ================================
 			<States<T>>::mutate(&sender, |state| {
 				state.secret = hash;
-			})
+			});
+
+			Ok(())
+		}
+
+		pub fn init(origin, pubkey: Public, hash: T::Hash) -> Result {
+			// ==== Verification ================================
+			let sender = ensure_signed(origin)?;
+
+			ensure!(!<States<T>>::exists(&sender), "State must be set at most once.");
+
+			// ==== State change ================================
+			<States<T>>::insert(&sender, State {
+				pubkey,
+				secret: hash,
+			});
+
+			Ok(())
 		}
 
 		pub fn redeem_ticket(origin, signature: Signature, counterparty: T::AccountId, pre_image: PreImage<T>, s_a: PreImage<T>, s_b: PreImage<T>, amount: T::Balance, win_prob: T::Hash) -> Result {
@@ -212,9 +234,9 @@ decl_module! {
 			ensure!(<States<T>>::exists(&sender), "Sender must have set an on-chain secret.");
 			ensure!(<T as system::Trait>::Hashing::hash(pre_image.as_ref()) == Self::state(&sender).secret, "Given value is not a pre-image of the stored on-chain secret");
 
-			ensure!(<AccountIdMap<T>>::exists(&counterparty), "We do not know the public key of the counterparty.");
+			ensure!(<States<T>>::exists(&counterparty), "We do not know the public key of the counterparty.");
 
-			let counterparty_pubkey = Self::pubkey(&counterparty);
+			let counterparty_pubkey = Self::state(&counterparty).pubkey;
 
 			let channel_id = Self::get_id(&sender, &counterparty);
 			let channel = Self::channels(channel_id);
@@ -283,8 +305,6 @@ decl_module! {
 			// ==== Verification ================================
 			let sender = ensure_signed(origin)?;
 
-			ensure!(<AccountIdMap<T>>::exists(&counterparty), "We do not know the public key of the counterparty.");
-
 			let channel_id = Self::get_id(&sender, &counterparty);
 
 			let channel = Self::channels(channel_id);
@@ -332,7 +352,7 @@ impl<T: Trait> Module<T> {
 		a < b
 	}
 
-	/// Give the payment channels a meaningful ID that is the same for
+	/// Give the payment channels a meaningful ID that is the same for both
 	/// parties
 	fn get_id(a: &T::AccountId, b: &T::AccountId) -> ChannelId<T> {
 		if Self::is_party_a(&a, &b) {
@@ -352,56 +372,103 @@ impl<T: Trait> Module<T> {
 mod tests {
 	use super::*;
 
-	use runtime_io::with_externalities;
-	use primitives::{H256, Blake2Hasher};
+	use runtime_io::{with_externalities, TestExternalities};
+	use primitives::{H256, Blake2Hasher, sr25519, Hasher, Pair};
 	use support::{impl_outer_origin, assert_ok};
 	use runtime_primitives::{
 		BuildStorage,
-		traits::{BlakeTwo256, IdentityLookup},
+		traits::{BlakeTwo256, IdentityLookup, Verify},
 		testing::{Digest, DigestItem, Header}
 	};
 
+	type AccountId = <AccountSignature as Verify>::Signer;
+	type AccountSignature = sr25519::Signature;
+
 	impl_outer_origin! {
-		pub enum Origin for Test {}
+		pub enum Origin for HoprTest {}
 	}
 
 	// For testing the module, we construct most of a mock runtime. This means
 	// first constructing a configuration type (`Test`) which `impl`s each of the
 	// configuration traits of modules we want to use.
 	#[derive(Clone, Eq, PartialEq)]
-	pub struct Test;
-	impl system::Trait for Test {
+	pub struct HoprTest;
+	impl system::Trait for HoprTest {
 		type Origin = Origin;
 		type Index = u64;
 		type BlockNumber = u64;
 		type Hash = H256;
 		type Hashing = BlakeTwo256;
 		type Digest = Digest;
-		type AccountId = u64;
+		type AccountId = AccountId;
 		type Lookup = IdentityLookup<Self::AccountId>;
 		type Header = Header;
 		type Event = ();
 		type Log = DigestItem;
 	}
-	impl Trait for Test {
+
+	impl timestamp::Trait for HoprTest {
+		/// A timestamp: seconds since the unix epoch.
+		type Moment = u64;
+		type OnTimestampSet = ();
+	}
+
+	impl balances::Trait for HoprTest {
+		/// The type for recording an account's balance.
+		type Balance = u128;
+		/// What to do if an account's free balance gets zeroed.
+		type OnFreeBalanceZero = ();
+		/// What to do if a new account is created.
+		type OnNewAccount = ();
+		/// The uniquitous event type.
+		type Event = ();
+
+		type TransactionPayment = ();
+		type DustRemoval = ();
+		type TransferPayment = ();
+	}
+
+	impl super::Trait for HoprTest {
 		type Event = ();
 	}
-	type hopr = Module<Test>;
+	type Hopr = Module<HoprTest>;
 
 	// This function basically just builds a genesis storage key/value store according to
 	// our desired mockup.
-	fn new_test_ext() -> runtime_io::TestExternalities<Blake2Hasher> {
-		system::GenesisConfig::<Test>::default().build_storage().unwrap().0.into()
+	fn new_test_ext() -> TestExternalities<Blake2Hasher> {
+		system::GenesisConfig::<HoprTest>::default().build_storage().unwrap().0.into()
+	}
+
+	const PRE_IMAGE: [u8; 32] = [0u8; 32];
+
+	fn account_key(s: &str) -> AccountId {
+		sr25519::Pair::from_string(&format!("//{}", s), None)
+			.expect("static values are valid; qed")
+			.public()
 	}
 
 	#[test]
-	fn it_works_for_default_value() {
+	fn test_init() {
 		with_externalities(&mut new_test_ext(), || {
-			// Just a dummy test for the dummy funtion `do_something`
-			// calling the `do_something` function with a value 42
-			assert_ok!(hopr::do_something(Origin::signed(1), 42));
-			// asserting that the stored value is equal to what we stored
-			assert_eq!(hopr::something(), Some(42));
+			let account_id = account_key("//Alice");
+			let sender = Origin::signed(account_key("//Alice"));
+
+			assert_ok!(Hopr::init(sender, account_id, <Blake2Hasher as Hasher>::hash(&PRE_IMAGE)));
 		});
+	}
+
+	#[test]
+	fn verify_set_secret() {
+		with_externalities(&mut new_test_ext(), || {
+			let account_id = account_key("//Alice");
+			let sender = Origin::signed(account_key("//Alice"));
+
+			let first_hash = <Blake2Hasher as Hasher>::hash(&PRE_IMAGE);
+			
+			assert_ok!(Hopr::init(sender.clone(), account_id, first_hash.clone()));
+
+			let second_hash = <Blake2Hasher as Hasher>::hash(first_hash.as_ref());
+			assert_ok!(Hopr::set_secret(sender, second_hash));
+		})
 	}
 }

@@ -40,11 +40,6 @@ impl<Balance, Moment> Default for Channel<Balance, Moment> {
 #[derive(Encode, Decode, Default, Clone, PartialEq)]
 #[cfg_attr(feature = "std", derive(Debug))]
 pub struct State<Hash, Public> {
-	// number of open channels
-	// Note: the smart contract doesn't know the actual
-	//       channels but it knows how many open ones
-	//       there are.
-	// openChannels: u16,
 	secret: Hash,
 	pubkey: Public
 }
@@ -77,6 +72,12 @@ decl_module! {
 			// ==== Verification ================================
 			let sender = ensure_signed(origin)?;
 
+			ensure!(sender != counterparty, "Sender and counterparty must not be the same.");
+			ensure!(funds > <T::Balance as As<u64>>::sa(0), "Funds must be strictly greater than zero.");
+
+			ensure!(<States<T>>::exists(&sender), "Party must have called init() before.");
+			ensure!(<States<T>>::exists(&counterparty), "Party must have called init() before.");
+
 			ensure!(<balances::Module<T> as ReservableCurrency<<T as system::Trait>::AccountId>>::can_reserve(&sender, funds), "User has not enough funds.");
 
 			let channel_id = Self::get_id(&sender, &counterparty);
@@ -106,7 +107,7 @@ decl_module! {
 					} else {
 						channel = Channel::Funded(ChannelBalance {
 							balance: channel_balance.balance.checked_add(&funds).ok_or("integer error")?,
-							balance_a: channel_balance.balance_a.checked_sub(&funds).ok_or("integer error")?,
+							balance_a: channel_balance.balance_a,
 						});
 					}
 				},
@@ -154,11 +155,14 @@ decl_module! {
 			Ok(())
 		}
 
-		/// Initialise a channel that is funded by both sides and turn it immediately into
+		/// Initialises a channel that is funded by both sides and turn it immediately into
 		/// an active one.
 		pub fn create_funded(origin, counterparty: T::AccountId, signature: Signature, funds: T::Balance) -> Result {
 			// ==== Verification ================================
 			let sender = ensure_signed(origin)?;
+
+			ensure!(sender != counterparty, "Sender and counterparty must not be the same.");
+			ensure!(funds > <T::Balance as As<u64>>::sa(0), "Funds must be strictly greater than zero.");
 
 			ensure!(<States<T>>::exists(&counterparty), "We do not know the public key of the counterparty.");
 
@@ -212,6 +216,7 @@ decl_module! {
 			Ok(())
 		}
 
+		/// Initialises the stored on-chain data.
 		pub fn init(origin, pubkey: Public, hash: T::Hash) -> Result {
 			// ==== Verification ================================
 			let sender = ensure_signed(origin)?;
@@ -227,6 +232,7 @@ decl_module! {
 			Ok(())
 		}
 
+		/// Redeems a previously issued ticket.
 		pub fn redeem_ticket(origin, signature: Signature, counterparty: T::AccountId, pre_image: PreImage<T>, s_a: PreImage<T>, s_b: PreImage<T>, amount: T::Balance, win_prob: T::Hash) -> Result {
 			// ==== Verification ================================
 			let sender = ensure_signed(origin)?;
@@ -297,13 +303,55 @@ decl_module! {
 			Ok(())
 		}
 
-		pub fn initiate_recovery() {
-			// TODO
+		/// Restores the channel to a previously agreed backup state.
+		pub fn initiate_recovery(origin, counterparty: T::AccountId, signature: Signature, channel_balance: ChannelBalance<T::Balance>) -> Result {
+			// ==== Verification ================================
+			let sender = ensure_signed(origin)?;
+
+			ensure!(sender != counterparty, "Sender and counterparty must not be the same.");
+
+			ensure!(<States<T>>::exists(&sender), "Party must have called init() before.");
+			ensure!(<States<T>>::exists(&counterparty), "Party must have called init() before.");
+
+			let channel_id = Self::get_id(&sender, &counterparty);
+
+			let channel = Self::channels(channel_id);
+
+			let mut _channel_balance: Option<ChannelBalance<T::Balance>> = None;
+
+			match channel {
+				Channel::Active(__channel_balance) => {
+					_channel_balance = Some(__channel_balance);
+				},
+				Channel::Funded(__channel_balance) => {
+					_channel_balance = Some(__channel_balance);
+				},
+				_ => panic!("Channel does not exist and/or its state does not fit."),
+			}
+
+			ensure!(_channel_balance.clone().unwrap() == channel_balance, "Channel must be in the agreed state.");
+
+			let counterparty_pubkey = Self::state(&counterparty).pubkey;
+
+			let message = ("restore_transaction", channel_id, channel_balance).encode();
+			ensure!(Signature::verify(&signature, message.as_slice(), &counterparty_pubkey), "Signature must be valid.");
+			
+			let updated_balance = _channel_balance.unwrap();
+
+			// ==== State change ================================
+			let end_of_pending_window = timestamp::Module::<T>::now().checked_add(&<T::Moment as As<u64>>::sa(PENDING_WINDOW)).ok_or("Integer error")?;
+			<Channels<T>>::insert(channel_id, Channel::PendingSettlement(updated_balance.clone(), end_of_pending_window));
+
+			Self::deposit_event(RawEvent::InitiatedSettlement(channel_id, updated_balance.balance_a));
+
+			Ok(())
 		}
 
 		pub fn initiate_settlement(origin, counterparty: T::AccountId) {
 			// ==== Verification ================================
 			let sender = ensure_signed(origin)?;
+
+			ensure!(sender != counterparty, "Sender and counterparty must not be the same.");
 
 			let channel_id = Self::get_id(&sender, &counterparty);
 
@@ -314,18 +362,51 @@ decl_module! {
 				Channel::Active(__channel_balance) => {
 					_channel_balance = Some(__channel_balance);
 				},
-				_ => panic!("Channel does not exist and/or its state does not fit.")
+				_ => panic!("Channel does not exist and/or its state does not fit."),
 			}
 
 			// ==== State change ================================
-			let end_of_pending_window = timestamp::Module::<T>::now().checked_add(&<T::Moment as As<u64>>::sa(PENDING_WINDOW)).ok_or("Integer overflow")?;
+			let end_of_pending_window = timestamp::Module::<T>::now().checked_add(&<T::Moment as As<u64>>::sa(PENDING_WINDOW)).ok_or("Integer error")?;
 			<Channels<T>>::insert(channel_id, Channel::PendingSettlement(_channel_balance.clone().unwrap(), end_of_pending_window));
 
-			Self::deposit_event(RawEvent::InitiatedSettlement(channel_id, _channel_balance.unwrap().balance));
+			Self::deposit_event(RawEvent::InitiatedSettlement(channel_id, _channel_balance.unwrap().balance_a));
 		}
 
-		pub fn withdraw() {
-			// TODO
+		pub fn withdraw(origin, counterparty: T::AccountId) {
+			// ==== Verification ================================
+			let sender = ensure_signed(origin)?;
+
+			ensure!(sender != counterparty, "Sender and counterparty must not be the same.");
+
+			ensure!(<States<T>>::exists(&sender), "Party must have called init() before.");
+			ensure!(<States<T>>::exists(&counterparty), "Party must have called init() before.");
+
+			let channel_id = Self::get_id(&sender, &counterparty);
+			
+			let channel = Self::channels(&channel_id);
+
+			let mut _channel_balance: Option<ChannelBalance<T::Balance>> = None;
+
+			match channel {
+				Channel::PendingSettlement(__channel_balance, timestamp) => {
+					ensure!(timestamp::Module::<T>::now() >= timestamp, "Channel is not yet recoverable.");
+					_channel_balance = Some(__channel_balance);
+				},
+				_ => panic!("Channel does not exist and/or its state does not fit."),
+			}
+
+			let updated_balance = _channel_balance.unwrap();
+
+			// ==== State change ================================
+			if Self::is_party_a(&sender, &counterparty) {
+				<balances::Module<T> as ReservableCurrency<<T as system::Trait>::AccountId>>::unreserve(&sender, updated_balance.balance_a);
+				<balances::Module<T> as ReservableCurrency<<T as system::Trait>::AccountId>>::unreserve(&counterparty, updated_balance.balance.checked_sub(&updated_balance.balance_a).ok_or("Integer error")?);
+			} else {
+				<balances::Module<T> as ReservableCurrency<<T as system::Trait>::AccountId>>::unreserve(&sender, updated_balance.balance.checked_sub(&updated_balance.balance_a).ok_or("Integer error")?);
+				<balances::Module<T> as ReservableCurrency<<T as system::Trait>::AccountId>>::unreserve(&counterparty, updated_balance.balance_a);
+			}
+
+			<Channels<T>>::remove(channel_id);
 		}
 	}
 }
@@ -374,7 +455,7 @@ mod tests {
 
 	use runtime_io::{with_externalities, TestExternalities};
 	use primitives::{H256, Blake2Hasher, sr25519, Hasher, Pair};
-	use support::{impl_outer_origin, assert_ok};
+	use support::{impl_outer_origin, assert_ok, assert_noop};
 	use runtime_primitives::{
 		BuildStorage,
 		traits::{BlakeTwo256, IdentityLookup, Verify},
@@ -428,15 +509,32 @@ mod tests {
 		type TransferPayment = ();
 	}
 
+	// impl sudo::Trait for Runtime {
+	// 	type Event = ();
+	// 	type Proposal = ();
+	// }
+
 	impl super::Trait for HoprTest {
 		type Event = ();
 	}
+
 	type Hopr = Module<HoprTest>;
 
-	// This function basically just builds a genesis storage key/value store according to
-	// our desired mockup.
 	fn new_test_ext() -> TestExternalities<Blake2Hasher> {
-		system::GenesisConfig::<HoprTest>::default().build_storage().unwrap().0.into()
+		let alice = account_key("Alice");
+		let bob = account_key("Bob");
+
+		let mut t = system::GenesisConfig::<HoprTest>::default().build_storage().unwrap().0;
+		t.extend(balances::GenesisConfig::<HoprTest> {			
+			transaction_base_fee: 0,
+			transaction_byte_fee: 0,
+			existential_deposit: 0,
+			transfer_fee: 0,
+			creation_fee: 0,
+			balances: vec![alice, bob].iter().cloned().map(|k|(k, 1 << 60)).collect(),
+			vesting: vec![],
+		}.build_storage().unwrap().0);
+    	t.into()
 	}
 
 	const PRE_IMAGE: [u8; 32] = [0u8; 32];
@@ -448,27 +546,88 @@ mod tests {
 	}
 
 	#[test]
-	fn test_init() {
+	fn verify_init() {
 		with_externalities(&mut new_test_ext(), || {
-			let account_id = account_key("//Alice");
-			let sender = Origin::signed(account_key("//Alice"));
+			let account_id = account_key("Alice");
+			let sender = Origin::signed(account_id.clone());
 
-			assert_ok!(Hopr::init(sender, account_id, <Blake2Hasher as Hasher>::hash(&PRE_IMAGE)));
+			assert_ok!(Hopr::init(sender.clone(), account_id.clone(), <Blake2Hasher as Hasher>::hash(&PRE_IMAGE)));
+
+			assert_noop!(Hopr::init(sender.clone(), account_id.clone(), <Blake2Hasher as Hasher>::hash(&PRE_IMAGE)), "State must be set at most once.");
 		});
 	}
 
 	#[test]
 	fn verify_set_secret() {
 		with_externalities(&mut new_test_ext(), || {
-			let account_id = account_key("//Alice");
-			let sender = Origin::signed(account_key("//Alice"));
+			let account_id = account_key("Alice");
+			let sender = Origin::signed(account_id.clone());
 
 			let first_hash = <Blake2Hasher as Hasher>::hash(&PRE_IMAGE);
-			
+			let second_hash = <Blake2Hasher as Hasher>::hash(first_hash.as_ref());
+
+			assert_noop!(Hopr::set_secret(sender.clone(), second_hash.clone()), "Call init() before setting a new on-chain secret.");
+
 			assert_ok!(Hopr::init(sender.clone(), account_id, first_hash.clone()));
 
-			let second_hash = <Blake2Hasher as Hasher>::hash(first_hash.as_ref());
-			assert_ok!(Hopr::set_secret(sender, second_hash));
+			assert_ok!(Hopr::set_secret(sender.clone(), second_hash.clone()));
+
+			assert_noop!(Hopr::set_secret(sender, second_hash), "New and old hash must not be the same.");
 		})
 	}
+
+	#[test]
+	fn verify_create() {
+		with_externalities(&mut new_test_ext(), || {
+			let account_id = account_key("Alice");
+			let account_id_counterparty = account_key("Bob");
+
+			let sender = Origin::signed(account_id.clone());
+			let counterparty = Origin::signed(account_id_counterparty.clone());
+			
+			assert_noop!(Hopr::create(sender.clone(), 1, account_id_counterparty.clone()), "Party must have called init() before.");
+			assert_noop!(Hopr::create(counterparty.clone(), 1, account_id.clone()), "Party must have called init() before.");
+
+			assert_noop!(Hopr::create(sender.clone(), 1, account_id.clone()), "Sender and counterparty must not be the same.");
+			assert_noop!(Hopr::create(sender.clone(), 0, account_id_counterparty.clone()), "Funds must be strictly greater than zero.");
+
+			assert_ok!(Hopr::init(sender.clone(), account_id.clone(), <Blake2Hasher as Hasher>::hash(&PRE_IMAGE)));
+			assert_ok!(Hopr::init(counterparty.clone(), account_id_counterparty.clone(), <Blake2Hasher as Hasher>::hash(&PRE_IMAGE)));
+
+			assert_ok!(Hopr::create(sender.clone(), 1, account_id_counterparty.clone()));
+
+			let channel_id = Hopr::get_id(&account_id, &account_id_counterparty);
+			assert_eq!(Hopr::channels(channel_id), Channel::Funded(ChannelBalance {
+				balance: 1,
+				balance_a: 0,
+			}));
+
+			assert_ok!(Hopr::create(sender.clone(), 1, account_id_counterparty.clone()));
+
+			assert_eq!(Hopr::channels(channel_id), Channel::Funded(ChannelBalance {
+				balance: 2,
+				balance_a: 0,
+			}));
+
+			assert_ok!(Hopr::create(counterparty.clone(), 1, account_id.clone()));
+
+			assert_eq!(Hopr::channels(channel_id), Channel::Funded(ChannelBalance {
+				balance: 3,
+				balance_a: 1,
+			}));
+		})
+	}
+
+	// #[test]
+	// fn verify_create_funded() {
+	// 	with_externalities(&mut new_test_ext(), || {
+	// 		let account_id = account_key("Alice");
+	// 		let account_id_counterparty = account_key("Bob");
+
+	// 		let sender = Origin::signed(account_id.clone());
+	// 		let counterparty = Origin::signed(account_id_counterparty.clone());
+
+
+	// 	})
+	// }
 }

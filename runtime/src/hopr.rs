@@ -396,7 +396,7 @@ decl_module! {
 					channel_balance = Some(__channel_balance);
 				},
 				_ => {
-					Err("Channel does not exist and/or its state does not fit.");
+					return Err("Channel does not exist and/or its state does not fit.");
 				},
 			}
 
@@ -853,7 +853,7 @@ mod tests {
 			let timestamp = timestamp::Module::<HoprTest>::now().checked_add(PENDING_WINDOW).unwrap();
 			assert_eq!(Hopr::channels(channel_id.clone()), Channel::PendingSettlement(new_channel_balance.clone(), timestamp.clone()));
 
-			assert_ok!(Hopr::withdraw(sender.clone(), account_id_counterparty.clone()), "Channel is not yet recoverable.");
+			assert_noop!(Hopr::withdraw(sender.clone(), account_id_counterparty.clone()), "Channel is not yet recoverable.");
 
 			assert_ok!(Hopr::dispatch(timestamp::Call::<HoprTest>::set(timestamp), Origin::INHERENT));
 

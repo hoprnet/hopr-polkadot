@@ -1,18 +1,19 @@
+use parity_codec::{Decode, Encode};
+use primitives::sr25519::{Public, Signature};
+use runtime_primitives::traits::{As, CheckedAdd, CheckedSub, Hash, Verify};
 /// A runtime module template with necessary imports
 
 /// Feel free to remove or edit this file as needed.
 /// If you change the name of this file, make sure to update its references in runtime/src/lib.rs
 /// If you remove this file, you can remove those references
 
-
 /// For more guidance on Substrate modules, see the example module
 /// https://github.com/paritytech/substrate/blob/master/srml/example/src/lib.rs
-
-use support::{decl_module, decl_storage, decl_event, ensure, StorageMap, dispatch::Result, traits::{ReservableCurrency}};
-use runtime_primitives::traits::{Hash, Verify, CheckedAdd, CheckedSub, As};
-use system::{ensure_signed};
-use parity_codec::{Encode, Decode};
-use primitives::{sr25519::{Public, Signature}};
+use support::{
+	decl_event, decl_module, decl_storage, dispatch::Result, ensure, traits::ReservableCurrency,
+	StorageMap,
+};
+use system::ensure_signed;
 
 /// Length of the pending_window in seconds
 const PENDING_WINDOW: u64 = 1 * 60;
@@ -30,18 +31,20 @@ pub enum Channel<Balance, Moment> {
 	Uninitialized,
 	Funded(ChannelBalance<Balance>),
 	Active(ChannelBalance<Balance>),
-	PendingSettlement(ChannelBalance<Balance>, Moment)
+	PendingSettlement(ChannelBalance<Balance>, Moment),
 }
 
 impl<Balance, Moment> Default for Channel<Balance, Moment> {
-	fn default() -> Self { Self::Uninitialized }
+	fn default() -> Self {
+		Self::Uninitialized
+	}
 }
 
 #[derive(Encode, Decode, Default, Clone, PartialEq)]
 #[cfg_attr(feature = "std", derive(Debug))]
 pub struct State<Hash, Public> {
 	secret: Hash,
-	pubkey: Public
+	pubkey: Public,
 }
 
 #[derive(Encode, Decode, Default, Clone, PartialEq)]
@@ -90,44 +93,39 @@ decl_module! {
 
 			let channel_id = Self::get_id(&sender, &counterparty);
 
-			let mut channel = Self::channels(channel_id);
-
-			match channel {
+			let channel = match Self::channels(channel_id) {
 				Channel::Uninitialized => {
 					if Self::is_party_a(&sender, &counterparty) {
-						channel = Channel::Funded(ChannelBalance {
+						Channel::Funded(ChannelBalance {
 							balance: funds,
 							balance_a: funds,
-						});
+						})
 					} else {
-						channel = Channel::Funded(ChannelBalance {
+						Channel::Funded(ChannelBalance {
 							balance: funds,
 							balance_a: <T::Balance as As<u64>>::sa(0),
-						});
+						})
 					}
 				},
 				Channel::Funded(channel_balance) => {
 					if Self::is_party_a(&sender, &counterparty) {
-						channel = Channel::Funded(ChannelBalance {
+						Channel::Funded(ChannelBalance {
 							balance: channel_balance.balance.checked_add(&funds).ok_or("integer error")?,
 							balance_a: channel_balance.balance_a.checked_add(&funds).ok_or("integer error")?,
-						});
+						})
 					} else {
-						channel = Channel::Funded(ChannelBalance {
+						Channel::Funded(ChannelBalance {
 							balance: channel_balance.balance.checked_add(&funds).ok_or("integer error")?,
 							balance_a: channel_balance.balance_a,
-						});
+						})
 					}
 				},
-				_ => {
-					return Err("Channel is cannot be created twice.")
-				},
-			}
+				_ => return Err("Channel is must not be created twice."),
+			};
 
 			// ==== State change ================================
 			<Channels<T>>::insert(channel_id, channel);
 			<balances::Module<T> as ReservableCurrency<<T as system::Trait>::AccountId>>::reserve(&sender, funds)?;
-			
 			Ok(())
 		}
 
@@ -142,30 +140,22 @@ decl_module! {
 			ensure!(<States<T>>::exists(&counterparty), "Party must have called init() before.");
 
 			let channel_id = Self::get_id(&sender, &counterparty);
-			
 			ensure!(<Channels<T>>::exists(&channel_id), "Channel does not exist and/or its state does not fit.");
 
-			let channel: Channel<T::Balance, T::Moment> = Self::channels(&channel_id);
-
-			let channel_balance: Option<ChannelBalance<T::Balance>>;
-
-			if let Channel::Funded(_channel_balance) = channel.clone() {
-				channel_balance = Some(_channel_balance.clone());
-			} else {
-				return Err("Channel does not exist and/or its state does not fit.");
-			}
+			let channel_balance = match Self::channels(&channel_id) {
+				Channel::Funded(channel_balance) => channel_balance,
+				_ => return Err("Channel does not exist and/or its state does not fit.")
+			};
 
 			let counterparty_pubkey = Self::state(counterparty).pubkey;
-
-			ensure!(Signature::verify(&signature, channel.encode().as_slice(), &counterparty_pubkey), "Invalid signature.");
-			let updated_channel: Channel<T::Balance, T::Moment> = Channel::Active(channel_balance.clone().unwrap());
+			ensure!(Signature::verify(&signature, (Channel::Funded(channel_balance.clone()) as Channel<T::Balance, T::Moment>).encode().as_slice(), &counterparty_pubkey), "Invalid signature.");
 
 			// ==== State change ================================
 			Self::test_and_set_nonce(<T as system::Trait>::Hashing::hash(signature.as_ref()))?;
 
-			<Channels<T>>::insert(channel_id, updated_channel);
+			<Channels<T>>::insert(channel_id, Channel::Active(channel_balance.clone()));
 
-			Self::deposit_event(RawEvent::Opened(channel_id, channel_balance.clone().unwrap().balance, channel_balance.unwrap().balance_a));
+			Self::deposit_event(RawEvent::Opened(channel_id, channel_balance.balance, channel_balance.balance_a));
 
 			Ok(())
 		}
@@ -186,20 +176,16 @@ decl_module! {
 				balance_a: funds,
 			};
 
-			let mut channel: Channel<T::Balance, T::Moment> = Channel::Funded(channel_balance.clone());
-
 			let counterparty_pubkey: Public = Self::state(&counterparty).pubkey;
 
 			let channel_id: ChannelId<T> = Self::get_id(&counterparty, &sender);
 
 			ensure!(!<Channels<T>>::exists(&channel_id), "Channel must not exist.");
 
-			ensure!(Signature::verify(&signature, channel.encode().as_slice(), &counterparty_pubkey), "Signature must be valid.");
+			ensure!(Signature::verify(&signature, (Channel::Funded(channel_balance.clone()) as Channel<T::Balance, T::Moment>).encode().as_slice(), &counterparty_pubkey), "Signature must be valid.");
 
 			ensure!(<balances::Module<T> as ReservableCurrency<<T as system::Trait>::AccountId>>::can_reserve(&sender, funds), "User does have not enough funds.");
 			ensure!(<balances::Module<T> as ReservableCurrency<<T as system::Trait>::AccountId>>::can_reserve(&counterparty, funds), "Counterparty does not have enough funds.");
-
-			channel = Channel::Active(channel_balance.clone());
 
 			// ==== State change ================================
 			Self::test_and_set_nonce(<T as system::Trait>::Hashing::hash(signature.as_ref()))?;
@@ -207,7 +193,7 @@ decl_module! {
 			<balances::Module<T> as ReservableCurrency<<T as system::Trait>::AccountId>>::reserve(&sender, funds)?;
 			<balances::Module<T> as ReservableCurrency<<T as system::Trait>::AccountId>>::reserve(&counterparty, funds)?;
 
-			<Channels<T>>::insert(channel_id, channel);
+			<Channels<T>>::insert(channel_id, Channel::Active(channel_balance.clone()));
 
 			Self::deposit_event(RawEvent::Opened(channel_id, channel_balance.balance, channel_balance.balance_a));
 
@@ -265,30 +251,17 @@ decl_module! {
 			let counterparty_pubkey = Self::state(&counterparty).pubkey;
 
 			let channel_id = Self::get_id(&sender, &counterparty);
-			let channel = Self::channels(channel_id);
-			let channel_balance: Option<ChannelBalance<T::Balance>>;
 
-			match channel.clone() {
-				Channel::Active(_channel_balance) => {
-					channel_balance = Some(_channel_balance);
-				},
-				Channel::PendingSettlement(__channel_balance, timestamp) => {
-					if timestamp::Module::<T>::now() > timestamp {
-						return Err("Ticket redemption must have happened before end of pending window.");
-					}
-					channel_balance = Some(__channel_balance);
-				},
-				_ => {
-					return Err("Channel does not exist and/or its state does not fit.");
-				}
-			}
-
-			let mut updated_balance = channel_balance.unwrap();
+			let mut channel_balance = match Self::channels(channel_id) {
+				Channel::PendingSettlement(_, timestamp) if timestamp::Module::<T>::now() > timestamp => return Err("Ticket redemption must have happened before end of pending window."),
+				Channel::PendingSettlement(channel_balance, _) |  Channel::Active(channel_balance) => channel_balance,
+				_ => return Err("Channel does not exist and/or its state does not fit."),
+			};
 
 			if Self::is_party_a(&sender, &counterparty) {
-				ensure!(updated_balance.balance_a.checked_add(&amount).ok_or("Integer error.")? <= updated_balance.balance, "Transferred funds must not exceed channel balance.")
+				ensure!(channel_balance.balance_a.checked_add(&amount).ok_or("Integer error.")? <= channel_balance.balance, "Transferred funds must not exceed channel balance.");
 			} else {
-				ensure!(updated_balance.balance_a.checked_sub(&amount).ok_or("Integer error.")? >= <<T as balances::Trait>::Balance as As<u64>>::sa(0), "Transferred funds must not exceed channel balance.")
+				ensure!(channel_balance.balance_a.checked_sub(&amount).ok_or("Integer error.")? >= <<T as balances::Trait>::Balance as As<u64>>::sa(0), "Transferred funds must not exceed channel balance.");
 			}
 
 			let hashed_s_a = <T as system::Trait>::Hashing::hash(s_a.as_ref());
@@ -302,7 +275,6 @@ decl_module! {
 				amount,
 				win_prob
 			};
-			
 			let hashed_ticket = ticket.using_encoded(<T as system::Trait>::Hashing::hash);
 
 			ensure!(Self::cmp_hash(&hashed_ticket, &win_prob), "Ticket must be a win.");
@@ -311,9 +283,9 @@ decl_module! {
 
 			// ==== Prepare state change=========================
 			if Self::is_party_a(&sender, &counterparty) {
-				updated_balance.balance_a = updated_balance.balance_a.checked_add(&amount).ok_or("Integer error.")?;
+				channel_balance.balance_a = channel_balance.balance_a.checked_add(&amount).ok_or("Integer error.")?;
 			} else {
-				updated_balance.balance_a = updated_balance.balance_a.checked_sub(&amount).ok_or("Integer error.")?; 
+				channel_balance.balance_a = channel_balance.balance_a.checked_sub(&amount).ok_or("Integer error.")?;
 			}
 
 			// ==== State change ================================
@@ -323,13 +295,14 @@ decl_module! {
 				state.secret = pre_image;
 			});
 
-			match channel {
-				Channel::Active(_) => <Channels<T>>::insert(&channel_id, Channel::Active(updated_balance)),
-				Channel::PendingSettlement(_, timestamp) => <Channels<T>>::insert(&channel_id, Channel::PendingSettlement(updated_balance, timestamp)),
-				_ => {
-					return Err("Channel does not exist and/or its state does not fit.");
-				}
-			};
+			<Channels<T>>::mutate(&channel_id, |channel| {
+				*channel = match channel {
+					Channel::Active(_) => Channel::Active(channel_balance),
+					Channel::PendingSettlement(_, timestamp) => Channel::PendingSettlement(channel_balance, timestamp.clone()),
+					_ => return Err("Channel does not exist and/or its state does not fit."),
+				};
+				Ok(())
+			})?;
 
 			Ok(())
 		}
@@ -346,41 +319,28 @@ decl_module! {
 
 			let channel_id = Self::get_id(&sender, &counterparty);
 
-			let channel = Self::channels(channel_id);
+			let channel_balance = match Self::channels(channel_id) {
+				Channel::Active(channel_balance) | Channel::Funded(channel_balance) => channel_balance,
+				_ => return Err("Channel does not exist and/or its state does not fit."),
+			};
 
-			let channel_balance: Option<ChannelBalance<T::Balance>>;
-
-			match channel {
-				Channel::Active(_channel_balance) => {
-					channel_balance = Some(_channel_balance);
-				},
-				Channel::Funded(_channel_balance) => {
-					channel_balance = Some(_channel_balance);
-				},
-				_ => {
-					return Err("Channel does not exist and/or its state does not fit.")
-				},
-			}
-
-			ensure!(channel_balance.clone().unwrap() == claimed_channel_balance, "Channel must be in the agreed state.");
+			ensure!(channel_balance == claimed_channel_balance, "Channel must be in the agreed state.");
 
 			let counterparty_pubkey = Self::state(&counterparty).pubkey;
 
 			let message = ("restore_transaction", channel_id, claimed_channel_balance).encode();
 			ensure!(Signature::verify(&signature, message.as_slice(), &counterparty_pubkey), "Signature must be valid.");
-			
-			let updated_balance = channel_balance.unwrap();
 
 			// ==== State change ================================
 			let end_of_pending_window = timestamp::Module::<T>::now().checked_add(&<T::Moment as As<u64>>::sa(PENDING_WINDOW)).ok_or("Integer error")?;
-			<Channels<T>>::insert(channel_id, Channel::PendingSettlement(updated_balance.clone(), end_of_pending_window));
+			<Channels<T>>::insert(channel_id, Channel::PendingSettlement(channel_balance.clone(), end_of_pending_window));
 
-			Self::deposit_event(RawEvent::InitiatedSettlement(channel_id, updated_balance.balance_a));
+			Self::deposit_event(RawEvent::InitiatedSettlement(channel_id, channel_balance.balance_a));
 
 			Ok(())
 		}
 
-		pub fn initiate_settlement(origin, counterparty: T::AccountId) {
+		pub fn initiate_settlement(origin, counterparty: T::AccountId) -> Result {
 			// ==== Verification ================================
 			let sender = ensure_signed(origin)?;
 
@@ -388,26 +348,21 @@ decl_module! {
 
 			let channel_id = Self::get_id(&sender, &counterparty);
 
-			let channel = Self::channels(channel_id);
-			let channel_balance: Option<ChannelBalance<T::Balance>>;
-
-			match channel.clone() {
-				Channel::Active(__channel_balance) => {
-					channel_balance = Some(__channel_balance);
-				},
-				_ => {
-					return Err("Channel does not exist and/or its state does not fit.");
-				},
-			}
+			let channel_balance = match Self::channels(channel_id) {
+				Channel::Active(channel_balance) => channel_balance,
+				_ => return Err("Channel does not exist and/or its state does not fit."),
+			};
 
 			// ==== State change ================================
 			let end_of_pending_window = timestamp::Module::<T>::now().checked_add(&<T::Moment as As<u64>>::sa(PENDING_WINDOW)).ok_or("Integer error")?;
-			<Channels<T>>::insert(channel_id, Channel::PendingSettlement(channel_balance.clone().unwrap(), end_of_pending_window));
+			<Channels<T>>::insert(channel_id, Channel::PendingSettlement(channel_balance.clone(), end_of_pending_window));
 
-			Self::deposit_event(RawEvent::InitiatedSettlement(channel_id, channel_balance.unwrap().balance_a));
+			Self::deposit_event(RawEvent::InitiatedSettlement(channel_id, channel_balance.balance_a));
+
+			Ok(())
 		}
 
-		pub fn withdraw(origin, counterparty: T::AccountId) {
+		pub fn withdraw(origin, counterparty: T::AccountId) -> Result {
 			// ==== Verification ================================
 			let sender = ensure_signed(origin)?;
 
@@ -417,33 +372,26 @@ decl_module! {
 			ensure!(<States<T>>::exists(&counterparty), "Party must have called init() before.");
 
 			let channel_id = Self::get_id(&sender, &counterparty);
-			
 			let channel = Self::channels(&channel_id);
 
-			let channel_balance: Option<ChannelBalance<T::Balance>>;
-
-			match channel {
-				Channel::PendingSettlement(_channel_balance, timestamp) => {
-					ensure!(timestamp::Module::<T>::now() >= timestamp, "Channel is not yet recoverable.");
-					channel_balance = Some(_channel_balance);
-				},
-				_ => {
-					return Err("Channel does not exist and/or its state does not fit.")
-				},
-			}
-
-			let updated_balance = channel_balance.unwrap();
+			let channel_balance = match channel {
+				Channel::PendingSettlement(_, timestamp) if timestamp::Module::<T>::now() < timestamp => return Err("Channel is not yet recoverable."),
+				Channel::PendingSettlement(channel_balance, _) => channel_balance,
+				_ => return Err("Channel does not exist and/or its state does not fit."),
+			};
 
 			// ==== State change ================================
 			if Self::is_party_a(&sender, &counterparty) {
-				<balances::Module<T> as ReservableCurrency<<T as system::Trait>::AccountId>>::unreserve(&sender, updated_balance.balance_a);
-				<balances::Module<T> as ReservableCurrency<<T as system::Trait>::AccountId>>::unreserve(&counterparty, updated_balance.balance.checked_sub(&updated_balance.balance_a).ok_or("Integer error")?);
+				<balances::Module<T> as ReservableCurrency<<T as system::Trait>::AccountId>>::unreserve(&sender, channel_balance.balance_a);
+				<balances::Module<T> as ReservableCurrency<<T as system::Trait>::AccountId>>::unreserve(&counterparty, channel_balance.balance.checked_sub(&channel_balance.balance_a).ok_or("Integer error")?);
 			} else {
-				<balances::Module<T> as ReservableCurrency<<T as system::Trait>::AccountId>>::unreserve(&sender, updated_balance.balance.checked_sub(&updated_balance.balance_a).ok_or("Integer error")?);
-				<balances::Module<T> as ReservableCurrency<<T as system::Trait>::AccountId>>::unreserve(&counterparty, updated_balance.balance_a);
+				<balances::Module<T> as ReservableCurrency<<T as system::Trait>::AccountId>>::unreserve(&sender, channel_balance.balance.checked_sub(&channel_balance.balance_a).ok_or("Integer error")?);
+				<balances::Module<T> as ReservableCurrency<<T as system::Trait>::AccountId>>::unreserve(&counterparty, channel_balance.balance_a);
 			}
 
 			<Channels<T>>::remove(channel_id);
+
+			Ok(())
 		}
 	}
 }
@@ -490,14 +438,14 @@ impl<T: Trait> Module<T> {
 mod tests {
 	use super::*;
 
+	use primitives::{sr25519, Blake2Hasher, Hasher, Pair, H256};
 	use runtime_io::{with_externalities, TestExternalities};
-	use primitives::{H256, Blake2Hasher, sr25519, Hasher, Pair};
-	use support::{impl_outer_origin, assert_ok, assert_noop};
 	use runtime_primitives::{
-		BuildStorage,
+		testing::{Digest, DigestItem, Header},
 		traits::{BlakeTwo256, IdentityLookup, Verify},
-		testing::{Digest, DigestItem, Header}
+		BuildStorage,
 	};
+	use support::{assert_noop, assert_ok, impl_outer_origin};
 
 	type AccountId = <AccountSignature as Verify>::Signer;
 	type AccountSignature = sr25519::Signature;
@@ -561,17 +509,29 @@ mod tests {
 		let alice = account_key("Alice");
 		let bob = account_key("Bob");
 
-		let mut t = system::GenesisConfig::<HoprTest>::default().build_storage().unwrap().0;
-		t.extend(balances::GenesisConfig::<HoprTest> {			
-			transaction_base_fee: 0,
-			transaction_byte_fee: 0,
-			existential_deposit: 0,
-			transfer_fee: 0,
-			creation_fee: 0,
-			balances: vec![alice, bob].iter().cloned().map(|k|(k, 1 << 60)).collect(),
-			vesting: vec![],
-		}.build_storage().unwrap().0);
-    	t.into()
+		let mut t = system::GenesisConfig::<HoprTest>::default()
+			.build_storage()
+			.unwrap()
+			.0;
+		t.extend(
+			balances::GenesisConfig::<HoprTest> {
+				transaction_base_fee: 0,
+				transaction_byte_fee: 0,
+				existential_deposit: 0,
+				transfer_fee: 0,
+				creation_fee: 0,
+				balances: vec![alice, bob]
+					.iter()
+					.cloned()
+					.map(|k| (k, 1 << 60))
+					.collect(),
+				vesting: vec![],
+			}
+			.build_storage()
+			.unwrap()
+			.0,
+		);
+		t.into()
 	}
 
 	const PRE_IMAGE: [u8; 32] = [0u8; 32];
@@ -583,8 +543,7 @@ mod tests {
 	}
 
 	fn key(s: &str) -> sr25519::Pair {
-		sr25519::Pair::from_string(&format!("//{}", s), None)
-			.expect("static values are valid; qed")
+		sr25519::Pair::from_string(&format!("//{}", s), None).expect("static values are valid; qed")
 	}
 
 	#[test]
@@ -593,9 +552,20 @@ mod tests {
 			let account_id = account_key("Alice");
 			let sender = Origin::signed(account_id.clone());
 
-			assert_ok!(Hopr::init(sender.clone(), account_id.clone(), <Blake2Hasher as Hasher>::hash(&PRE_IMAGE)));
+			assert_ok!(Hopr::init(
+				sender.clone(),
+				account_id.clone(),
+				<Blake2Hasher as Hasher>::hash(&PRE_IMAGE)
+			));
 
-			assert_noop!(Hopr::init(sender.clone(), account_id.clone(), <Blake2Hasher as Hasher>::hash(&PRE_IMAGE)), "State must be set at most once.");
+			assert_noop!(
+				Hopr::init(
+					sender.clone(),
+					account_id.clone(),
+					<Blake2Hasher as Hasher>::hash(&PRE_IMAGE)
+				),
+				"State must be set at most once."
+			);
 		});
 	}
 
@@ -608,13 +578,19 @@ mod tests {
 			let first_hash = <Blake2Hasher as Hasher>::hash(&PRE_IMAGE);
 			let second_hash = <Blake2Hasher as Hasher>::hash(first_hash.as_ref());
 
-			assert_noop!(Hopr::set_secret(sender.clone(), second_hash.clone()), "Call init() before setting a new on-chain secret.");
+			assert_noop!(
+				Hopr::set_secret(sender.clone(), second_hash.clone()),
+				"Call init() before setting a new on-chain secret."
+			);
 
 			assert_ok!(Hopr::init(sender.clone(), account_id, first_hash.clone()));
 
 			assert_ok!(Hopr::set_secret(sender.clone(), second_hash.clone()));
 
-			assert_noop!(Hopr::set_secret(sender, second_hash), "New and old hash must not be the same.");
+			assert_noop!(
+				Hopr::set_secret(sender, second_hash),
+				"New and old hash must not be the same."
+			);
 		})
 	}
 
@@ -626,36 +602,69 @@ mod tests {
 
 			let sender = Origin::signed(account_id.clone());
 			let counterparty = Origin::signed(account_id_counterparty.clone());
-			
-			assert_noop!(Hopr::create(sender.clone(), 1, account_id_counterparty.clone()), "Party must have called init() before.");
-			assert_noop!(Hopr::create(counterparty.clone(), 1, account_id.clone()), "Party must have called init() before.");
 
-			assert_noop!(Hopr::create(sender.clone(), 1, account_id.clone()), "Sender and counterparty must not be the same.");
+			assert_noop!(
+				Hopr::create(sender.clone(), 1, account_id_counterparty.clone()),
+				"Party must have called init() before."
+			);
+			assert_noop!(
+				Hopr::create(counterparty.clone(), 1, account_id.clone()),
+				"Party must have called init() before."
+			);
 
-			assert_ok!(Hopr::init(sender.clone(), account_id.clone(), <Blake2Hasher as Hasher>::hash(&PRE_IMAGE)));
-			assert_ok!(Hopr::init(counterparty.clone(), account_id_counterparty.clone(), <Blake2Hasher as Hasher>::hash(&PRE_IMAGE)));
+			assert_noop!(
+				Hopr::create(sender.clone(), 1, account_id.clone()),
+				"Sender and counterparty must not be the same."
+			);
 
-			assert_ok!(Hopr::create(sender.clone(), 1, account_id_counterparty.clone()));
+			assert_ok!(Hopr::init(
+				sender.clone(),
+				account_id.clone(),
+				<Blake2Hasher as Hasher>::hash(&PRE_IMAGE)
+			));
+			assert_ok!(Hopr::init(
+				counterparty.clone(),
+				account_id_counterparty.clone(),
+				<Blake2Hasher as Hasher>::hash(&PRE_IMAGE)
+			));
 
+			assert_ok!(Hopr::create(
+				sender.clone(),
+				1,
+				account_id_counterparty.clone()
+			));
 			let channel_id = Hopr::get_id(&account_id, &account_id_counterparty);
-			assert_eq!(Hopr::channels(channel_id), Channel::Funded(ChannelBalance {
-				balance: 1,
-				balance_a: 0,
-			}));
+			assert_eq!(
+				Hopr::channels(channel_id),
+				Channel::Funded(ChannelBalance {
+					balance: 1,
+					balance_a: 0,
+				})
+			);
 
-			assert_ok!(Hopr::create(sender.clone(), 1, account_id_counterparty.clone()));
+			assert_ok!(Hopr::create(
+				sender.clone(),
+				1,
+				account_id_counterparty.clone()
+			));
 
-			assert_eq!(Hopr::channels(channel_id), Channel::Funded(ChannelBalance {
-				balance: 2,
-				balance_a: 0,
-			}));
+			assert_eq!(
+				Hopr::channels(channel_id),
+				Channel::Funded(ChannelBalance {
+					balance: 2,
+					balance_a: 0,
+				})
+			);
 
 			assert_ok!(Hopr::create(counterparty.clone(), 1, account_id.clone()));
 
-			assert_eq!(Hopr::channels(channel_id), Channel::Funded(ChannelBalance {
-				balance: 3,
-				balance_a: 1,
-			}));
+			assert_eq!(
+				Hopr::channels(channel_id),
+				Channel::Funded(ChannelBalance {
+					balance: 3,
+					balance_a: 1,
+				})
+			);
 		})
 	}
 
@@ -667,30 +676,66 @@ mod tests {
 
 			let sender = Origin::signed(account_id.clone());
 			let counterparty = Origin::signed(account_id_counterparty.clone());
-			
-			assert_noop!(Hopr::create(sender.clone(), 1, account_id_counterparty.clone()), "Party must have called init() before.");
-			assert_noop!(Hopr::create(counterparty.clone(), 1, account_id.clone()), "Party must have called init() before.");
 
-			assert_noop!(Hopr::create(sender.clone(), 1, account_id.clone()), "Sender and counterparty must not be the same.");
-			assert_noop!(Hopr::create(sender.clone(), 0, account_id_counterparty.clone()), "Funds must be strictly greater than zero.");
+			assert_noop!(
+				Hopr::create(sender.clone(), 1, account_id_counterparty.clone()),
+				"Party must have called init() before."
+			);
+			assert_noop!(
+				Hopr::create(counterparty.clone(), 1, account_id.clone()),
+				"Party must have called init() before."
+			);
 
-			assert_ok!(Hopr::init(sender.clone(), account_id.clone(), <Blake2Hasher as Hasher>::hash(&PRE_IMAGE)));
-			assert_ok!(Hopr::init(counterparty.clone(), account_id_counterparty.clone(), <Blake2Hasher as Hasher>::hash(&PRE_IMAGE)));
+			assert_noop!(
+				Hopr::create(sender.clone(), 1, account_id.clone()),
+				"Sender and counterparty must not be the same."
+			);
+			assert_noop!(
+				Hopr::create(sender.clone(), 0, account_id_counterparty.clone()),
+				"Funds must be strictly greater than zero."
+			);
 
+			assert_ok!(Hopr::init(
+				sender.clone(),
+				account_id.clone(),
+				<Blake2Hasher as Hasher>::hash(&PRE_IMAGE)
+			));
+			assert_ok!(Hopr::init(
+				counterparty.clone(),
+				account_id_counterparty.clone(),
+				<Blake2Hasher as Hasher>::hash(&PRE_IMAGE)
+			));
 			let channel_balance: ChannelBalance<u128> = ChannelBalance {
 				balance: 2,
 				balance_a: 1,
 			};
 
-			let signature = key("Bob").sign((Channel::Funded(channel_balance.clone()) as Channel<u128, u64>).encode().as_slice());
+			let signature = key("Bob").sign(
+				(Channel::Funded(channel_balance.clone()) as Channel<u128, u64>)
+					.encode()
+					.as_slice(),
+			);
 
-			assert_ok!(Hopr::create_funded(sender.clone(), account_id_counterparty.clone(), signature.clone(), 1));
+			assert_ok!(Hopr::create_funded(
+				sender.clone(),
+				account_id_counterparty.clone(),
+				signature.clone(),
+				1
+			));
 
 			let channel_id = Hopr::get_id(&account_id, &account_id_counterparty);
 
 			assert_eq!(Hopr::channels(channel_id), Channel::Active(channel_balance));
 
-			assert_noop!(Hopr::create_funded(sender.clone(), account_id_counterparty.clone(), signature.clone(), 1), "Channel must not exist.");
+			assert_noop!(
+				Hopr::create_funded(
+					sender.clone(),
+					account_id_counterparty.clone(),
+					signature.clone(),
+					1
+				),
+				"Channel must not exist."
+			);
 		})
 	}
 
@@ -707,32 +752,100 @@ mod tests {
 				balance: 1,
 				balance_a: 0,
 			};
-			let signature = key("Bob").sign((Channel::Funded(channel_balance.clone()) as Channel<u128, u64>).encode().as_slice());
-			let signature_sender = key("Alice").sign((Channel::Funded(channel_balance.clone()) as Channel<u128, u64>).encode().as_slice());
+			let signature = key("Bob").sign(
+				(Channel::Funded(channel_balance.clone()) as Channel<u128, u64>)
+					.encode()
+					.as_slice(),
+			);
+			let signature_sender = key("Alice").sign(
+				(Channel::Funded(channel_balance.clone()) as Channel<u128, u64>)
+					.encode()
+					.as_slice(),
+			);
 
-			assert_noop!(Hopr::set_active(counterparty.clone(), account_id_counterparty.clone(), signature.clone()), "Sender and counterparty must not be the same.");
+			assert_noop!(
+				Hopr::set_active(
+					counterparty.clone(),
+					account_id_counterparty.clone(),
+					signature.clone()
+				),
+				"Sender and counterparty must not be the same."
+			);
 
-			assert_noop!(Hopr::set_active(sender.clone(), account_id_counterparty.clone(), signature.clone()), "Party must have called init() before.");
-			assert_noop!(Hopr::set_active(counterparty.clone(), account_id.clone(), signature_sender.clone()), "Party must have called init() before.");
+			assert_noop!(
+				Hopr::set_active(
+					sender.clone(),
+					account_id_counterparty.clone(),
+					signature.clone()
+				),
+				"Party must have called init() before."
+			);
+			assert_noop!(
+				Hopr::set_active(
+					counterparty.clone(),
+					account_id.clone(),
+					signature_sender.clone()
+				),
+				"Party must have called init() before."
+			);
 
-			assert_ok!(Hopr::init(sender.clone(), account_id.clone(), <Blake2Hasher as Hasher>::hash(&PRE_IMAGE)));
-			assert_ok!(Hopr::init(counterparty.clone(), account_id_counterparty.clone(), <Blake2Hasher as Hasher>::hash(&PRE_IMAGE)));
+			assert_ok!(Hopr::init(
+				sender.clone(),
+				account_id.clone(),
+				<Blake2Hasher as Hasher>::hash(&PRE_IMAGE)
+			));
+			assert_ok!(Hopr::init(
+				counterparty.clone(),
+				account_id_counterparty.clone(),
+				<Blake2Hasher as Hasher>::hash(&PRE_IMAGE)
+			));
 
-			assert_noop!(Hopr::set_active(sender.clone(), account_id_counterparty.clone(), signature.clone()), "Channel does not exist and/or its state does not fit.");
+			assert_noop!(
+				Hopr::set_active(
+					sender.clone(),
+					account_id_counterparty.clone(),
+					signature.clone()
+				),
+				"Channel does not exist and/or its state does not fit."
+			);
 
-			assert_ok!(Hopr::create(sender.clone(), 1, account_id_counterparty.clone()));
+			assert_ok!(Hopr::create(
+				sender.clone(),
+				1,
+				account_id_counterparty.clone()
+			));
 
 			let channel_id = Hopr::get_id(&account_id, &account_id_counterparty);
 
-			assert_eq!(Hopr::channels(channel_id), Channel::Funded(channel_balance.clone()));
+			assert_eq!(
+				Hopr::channels(channel_id),
+				Channel::Funded(channel_balance.clone())
+			);
 
-			assert_ok!(Hopr::set_active(sender.clone(), account_id_counterparty.clone(), signature.clone()));
+			assert_ok!(Hopr::set_active(
+				sender.clone(),
+				account_id_counterparty.clone(),
+				signature.clone()
+			));
 
-			assert_noop!(Hopr::create(sender.clone(), 1, account_id_counterparty.clone()), "Channel is cannot be created twice.");
+			assert_noop!(
+				Hopr::create(sender.clone(), 1, account_id_counterparty.clone()),
+				"Channel is must not be created twice."
+			);
 
-			assert_eq!(Hopr::channels(channel_id), Channel::Active(channel_balance.clone()));
+			assert_eq!(
+				Hopr::channels(channel_id),
+				Channel::Active(channel_balance.clone())
+			);
 
-			assert_noop!(Hopr::set_active(sender.clone(), account_id_counterparty.clone(), signature.clone()), "Channel does not exist and/or its state does not fit.");
+			assert_noop!(
+				Hopr::set_active(
+					sender.clone(),
+					account_id_counterparty.clone(),
+					signature.clone()
+				),
+				"Channel does not exist and/or its state does not fit."
+			);
 
 			assert_eq!(Hopr::channels(channel_id), Channel::Active(channel_balance));
 		})
@@ -747,11 +860,22 @@ mod tests {
 			let sender = Origin::signed(account_id.clone());
 			let counterparty = Origin::signed(account_id_counterparty.clone());
 
-			assert_ok!(Hopr::init(sender.clone(), account_id.clone(), <Blake2Hasher as Hasher>::hash(&PRE_IMAGE)));
-			assert_ok!(Hopr::init(counterparty.clone(), account_id_counterparty.clone(), <Blake2Hasher as Hasher>::hash(&PRE_IMAGE)));
-			
-			assert_ok!(Hopr::create(sender.clone(), 1, account_id_counterparty.clone()));
+			assert_ok!(Hopr::init(
+				sender.clone(),
+				account_id.clone(),
+				<Blake2Hasher as Hasher>::hash(&PRE_IMAGE)
+			));
+			assert_ok!(Hopr::init(
+				counterparty.clone(),
+				account_id_counterparty.clone(),
+				<Blake2Hasher as Hasher>::hash(&PRE_IMAGE)
+			));
 
+			assert_ok!(Hopr::create(
+				sender.clone(),
+				1,
+				account_id_counterparty.clone()
+			));
 			let channel_balance: ChannelBalance<u128> = ChannelBalance {
 				balance: 1,
 				balance_a: 0,
@@ -759,30 +883,68 @@ mod tests {
 
 			let channel_id = Hopr::get_id(&account_id, &account_id_counterparty);
 
-			let opening_signature = key("Bob").sign((Channel::Funded(channel_balance.clone()) as Channel<u128, u64>).encode().as_slice());
+			let opening_signature = key("Bob").sign(
+				(Channel::Funded(channel_balance.clone()) as Channel<u128, u64>)
+					.encode()
+					.as_slice(),
+			);
 
-			assert_ok!(Hopr::set_active(sender.clone(), account_id_counterparty.clone(), opening_signature.clone()));
+			assert_ok!(Hopr::set_active(
+				sender.clone(),
+				account_id_counterparty.clone(),
+				opening_signature.clone()
+			));
 
 			let message = ("restore_transaction", channel_id, &channel_balance).encode();
 
 			let recovery_signature = key("Bob").sign(message.as_slice());
 
-			assert_ok!(Hopr::initiate_recovery(sender.clone(), account_id_counterparty.clone(), recovery_signature.clone(), channel_balance.clone()));
+			assert_ok!(Hopr::initiate_recovery(
+				sender.clone(),
+				account_id_counterparty.clone(),
+				recovery_signature.clone(),
+				channel_balance.clone()
+			));
 
-			assert_noop!(Hopr::initiate_recovery(sender.clone(), account_id_counterparty.clone(), recovery_signature.clone(), channel_balance.clone()), "Channel does not exist and/or its state does not fit.");
+			assert_noop!(
+				Hopr::initiate_recovery(
+					sender.clone(),
+					account_id_counterparty.clone(),
+					recovery_signature.clone(),
+					channel_balance.clone()
+				),
+				"Channel does not exist and/or its state does not fit."
+			);
 
-			let timestamp = timestamp::Module::<HoprTest>::now().checked_add(PENDING_WINDOW).unwrap();
-			assert_eq!(Hopr::channels(channel_id.clone()), Channel::PendingSettlement(channel_balance.clone(), timestamp));
+			let timestamp = timestamp::Module::<HoprTest>::now()
+				.checked_add(PENDING_WINDOW)
+				.unwrap();
+			assert_eq!(
+				Hopr::channels(channel_id.clone()),
+				Channel::PendingSettlement(channel_balance.clone(), timestamp)
+			);
 
-			assert_noop!(Hopr::withdraw(sender.clone(), account_id_counterparty.clone()), "Channel is not yet recoverable.");
+			assert_noop!(
+				Hopr::withdraw(sender.clone(), account_id_counterparty.clone()),
+				"Channel is not yet recoverable."
+			);
 
-			assert_ok!(Hopr::dispatch(timestamp::Call::<HoprTest>::set(timestamp), Origin::INHERENT));
+			assert_ok!(Hopr::dispatch(
+				timestamp::Call::<HoprTest>::set(timestamp),
+				Origin::INHERENT
+			));
 
-			assert_ok!(Hopr::withdraw(sender.clone(), account_id_counterparty.clone()));
+			assert_ok!(Hopr::withdraw(
+				sender.clone(),
+				account_id_counterparty.clone()
+			));
 
 			assert_eq!(Hopr::channels(channel_id.clone()), Channel::Uninitialized);
 
-			assert_noop!(Hopr::withdraw(sender.clone(), account_id_counterparty.clone()),  "Channel does not exist and/or its state does not fit.");
+			assert_noop!(
+				Hopr::withdraw(sender.clone(), account_id_counterparty.clone()),
+				"Channel does not exist and/or its state does not fit."
+			);
 		})
 	}
 
@@ -795,13 +957,25 @@ mod tests {
 			let sender = Origin::signed(account_id.clone());
 			let counterparty = Origin::signed(account_id_counterparty.clone());
 
-			assert_ok!(Hopr::init(sender.clone(), account_id.clone(), <Blake2Hasher as Hasher>::hash(&PRE_IMAGE)));
+			assert_ok!(Hopr::init(
+				sender.clone(),
+				account_id.clone(),
+				<Blake2Hasher as Hasher>::hash(&PRE_IMAGE)
+			));
 
-			let counterparty_on_chain_secret =  <Blake2Hasher as Hasher>::hash(<Blake2Hasher as Hasher>::hash(&PRE_IMAGE).as_ref());
-			assert_ok!(Hopr::init(counterparty.clone(), account_id_counterparty.clone(), counterparty_on_chain_secret));
-			
-			assert_ok!(Hopr::create(sender.clone(), 1, account_id_counterparty.clone()));
+			let counterparty_on_chain_secret =
+				<Blake2Hasher as Hasher>::hash(<Blake2Hasher as Hasher>::hash(&PRE_IMAGE).as_ref());
+			assert_ok!(Hopr::init(
+				counterparty.clone(),
+				account_id_counterparty.clone(),
+				counterparty_on_chain_secret
+			));
 
+			assert_ok!(Hopr::create(
+				sender.clone(),
+				1,
+				account_id_counterparty.clone()
+			));
 			let channel_balance: ChannelBalance<u128> = ChannelBalance {
 				balance: 1,
 				balance_a: 0,
@@ -809,7 +983,11 @@ mod tests {
 
 			let channel_id = Hopr::get_id(&account_id, &account_id_counterparty);
 
-			let opening_signature = key("Bob").sign((Channel::Funded(channel_balance.clone()) as Channel<u128, u64>).encode().as_slice());
+			let opening_signature = key("Bob").sign(
+				(Channel::Funded(channel_balance.clone()) as Channel<u128, u64>)
+					.encode()
+					.as_slice(),
+			);
 
 			let s_a: [u8; 32] = [3u8; 32];
 			let s_b: [u8; 32] = [4u8; 32];
@@ -817,48 +995,129 @@ mod tests {
 			let hashed_s_b = <Blake2Hasher as Hasher>::hash(&s_b);
 
 			let challenge = (hashed_s_a, hashed_s_b).using_encoded(<Blake2Hasher as Hasher>::hash);
-			
 			let ticket: LotteryTicket<H256, u128> = LotteryTicket {
 				challenge,
 				on_chain_secret: counterparty_on_chain_secret,
 				amount: 1,
-				win_prob: <Blake2Hasher as Hasher>::hash(&PRE_IMAGE)
+				win_prob: <Blake2Hasher as Hasher>::hash(&PRE_IMAGE),
 			};
-			
 			let redeem_signature = key("Alice").sign(ticket.encode().as_slice());
 
-			assert_noop!(Hopr::redeem_ticket(counterparty.clone(), redeem_signature.clone(), account_id.clone(), <Blake2Hasher as Hasher>::hash(&PRE_IMAGE), H256::from(s_a.clone()), H256::from(s_b.clone()), 1, <Blake2Hasher as Hasher>::hash(&PRE_IMAGE)), "Channel does not exist and/or its state does not fit.");
+			assert_noop!(
+				Hopr::redeem_ticket(
+					counterparty.clone(),
+					redeem_signature.clone(),
+					account_id.clone(),
+					<Blake2Hasher as Hasher>::hash(&PRE_IMAGE),
+					H256::from(s_a.clone()),
+					H256::from(s_b.clone()),
+					1,
+					<Blake2Hasher as Hasher>::hash(&PRE_IMAGE)
+				),
+				"Channel does not exist and/or its state does not fit."
+			);
 
-			assert_ok!(Hopr::set_active(sender.clone(), account_id_counterparty.clone(), opening_signature.clone()));
+			assert_ok!(Hopr::set_active(
+				sender.clone(),
+				account_id_counterparty.clone(),
+				opening_signature.clone()
+			));
 
-			assert_eq!(Hopr::channels(channel_id.clone()), Channel::Active(channel_balance.clone()));
+			assert_eq!(
+				Hopr::channels(channel_id.clone()),
+				Channel::Active(channel_balance.clone())
+			);
 
-			assert_noop!(Hopr::redeem_ticket(counterparty.clone(), redeem_signature.clone(), account_id.clone(), <Blake2Hasher as Hasher>::hash(&PRE_IMAGE), H256::from(s_a.clone()), H256::from(s_b.clone()), 2, <Blake2Hasher as Hasher>::hash(&PRE_IMAGE)), "Transferred funds must not exceed channel balance.");
+			assert_noop!(
+				Hopr::redeem_ticket(
+					counterparty.clone(),
+					redeem_signature.clone(),
+					account_id.clone(),
+					<Blake2Hasher as Hasher>::hash(&PRE_IMAGE),
+					H256::from(s_a.clone()),
+					H256::from(s_b.clone()),
+					2,
+					<Blake2Hasher as Hasher>::hash(&PRE_IMAGE)
+				),
+				"Transferred funds must not exceed channel balance."
+			);
 
-			assert_noop!(Hopr::redeem_ticket(counterparty.clone(), opening_signature.clone(), account_id.clone(), <Blake2Hasher as Hasher>::hash(&PRE_IMAGE), H256::from(s_a.clone()), H256::from(s_b.clone()), 1, <Blake2Hasher as Hasher>::hash(&PRE_IMAGE)), "Signature must be valid.");
+			assert_noop!(
+				Hopr::redeem_ticket(
+					counterparty.clone(),
+					opening_signature.clone(),
+					account_id.clone(),
+					<Blake2Hasher as Hasher>::hash(&PRE_IMAGE),
+					H256::from(s_a.clone()),
+					H256::from(s_b.clone()),
+					1,
+					<Blake2Hasher as Hasher>::hash(&PRE_IMAGE)
+				),
+				"Signature must be valid."
+			);
 
-			assert_ok!(Hopr::redeem_ticket(counterparty.clone(), redeem_signature.clone(), account_id.clone(), <Blake2Hasher as Hasher>::hash(&PRE_IMAGE), H256::from(s_a.clone()), H256::from(s_b.clone()), 1, <Blake2Hasher as Hasher>::hash(&PRE_IMAGE)));
+			assert_ok!(Hopr::redeem_ticket(
+				counterparty.clone(),
+				redeem_signature.clone(),
+				account_id.clone(),
+				<Blake2Hasher as Hasher>::hash(&PRE_IMAGE),
+				H256::from(s_a.clone()),
+				H256::from(s_b.clone()),
+				1,
+				<Blake2Hasher as Hasher>::hash(&PRE_IMAGE)
+			));
 
-			assert_noop!(Hopr::redeem_ticket(counterparty.clone(), redeem_signature.clone(), account_id.clone(), <Blake2Hasher as Hasher>::hash(&PRE_IMAGE), H256::from(s_a.clone()), H256::from(s_b.clone()), 1, <Blake2Hasher as Hasher>::hash(&PRE_IMAGE)), "Given value is not a pre-image of the stored on-chain secret");
+			assert_noop!(
+				Hopr::redeem_ticket(
+					counterparty.clone(),
+					redeem_signature.clone(),
+					account_id.clone(),
+					<Blake2Hasher as Hasher>::hash(&PRE_IMAGE),
+					H256::from(s_a.clone()),
+					H256::from(s_b.clone()),
+					1,
+					<Blake2Hasher as Hasher>::hash(&PRE_IMAGE)
+				),
+				"Given value is not a pre-image of the stored on-chain secret"
+			);
 
 			let new_channel_balance: ChannelBalance<u128> = ChannelBalance {
 				balance: 1,
 				balance_a: 1,
 			};
 
-			assert_eq!(Hopr::channels(channel_id.clone()), Channel::Active(new_channel_balance.clone()));
+			assert_eq!(
+				Hopr::channels(channel_id.clone()),
+				Channel::Active(new_channel_balance.clone())
+			);
 
-			assert_ok!(Hopr::initiate_settlement(sender.clone(), account_id_counterparty.clone()));
+			assert_ok!(Hopr::initiate_settlement(
+				sender.clone(),
+				account_id_counterparty.clone()
+			));
 
-			let timestamp = timestamp::Module::<HoprTest>::now().checked_add(PENDING_WINDOW).unwrap();
-			assert_eq!(Hopr::channels(channel_id.clone()), Channel::PendingSettlement(new_channel_balance.clone(), timestamp.clone()));
+			let timestamp = timestamp::Module::<HoprTest>::now()
+				.checked_add(PENDING_WINDOW)
+				.unwrap();
+			assert_eq!(
+				Hopr::channels(channel_id.clone()),
+				Channel::PendingSettlement(new_channel_balance.clone(), timestamp.clone())
+			);
 
-			assert_noop!(Hopr::withdraw(sender.clone(), account_id_counterparty.clone()), "Channel is not yet recoverable.");
+			assert_noop!(
+				Hopr::withdraw(sender.clone(), account_id_counterparty.clone()),
+				"Channel is not yet recoverable."
+			);
 
-			assert_ok!(Hopr::dispatch(timestamp::Call::<HoprTest>::set(timestamp), Origin::INHERENT));
+			assert_ok!(Hopr::dispatch(
+				timestamp::Call::<HoprTest>::set(timestamp),
+				Origin::INHERENT
+			));
 
-			assert_ok!(Hopr::withdraw(sender.clone(), account_id_counterparty.clone()));
-
+			assert_ok!(Hopr::withdraw(
+				sender.clone(),
+				account_id_counterparty.clone()
+			));
 		})
 	}
 }

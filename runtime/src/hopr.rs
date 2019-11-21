@@ -56,6 +56,13 @@ pub struct LotteryTicket<Hash, Balance> {
 	win_prob: Hash,
 }
 
+// #[derive(Encode, Decode, Default, Clone, PartialEq)]
+// #[cfg_attr(feature = "std", derive(Debug))]
+// pub struct SignedLotteryTicket<Hash, Balance, Signature> {
+// 	lottery_ticket: LotteryTicket<Hash, Balance>,
+// 	signature: Signature,
+// }
+
 pub type ChannelId<T> = <T as system::Trait>::Hash;
 pub type PreImage<T> = <T as system::Trait>::Hash;
 
@@ -93,39 +100,42 @@ decl_module! {
 
 			let channel_id = Self::get_id(&sender, &counterparty);
 
-			let channel = match Self::channels(channel_id) {
+			let channel_balance = match Self::channels(channel_id) {
 				Channel::Uninitialized => {
 					if Self::is_party_a(&sender, &counterparty) {
-						Channel::Funded(ChannelBalance {
+						ChannelBalance {
 							balance: funds,
 							balance_a: funds,
-						})
+						}
 					} else {
-						Channel::Funded(ChannelBalance {
+						ChannelBalance {
 							balance: funds,
 							balance_a: <T::Balance as As<u64>>::sa(0),
-						})
+						}
 					}
 				},
 				Channel::Funded(channel_balance) => {
 					if Self::is_party_a(&sender, &counterparty) {
-						Channel::Funded(ChannelBalance {
+						ChannelBalance {
 							balance: channel_balance.balance.checked_add(&funds).ok_or("integer error")?,
 							balance_a: channel_balance.balance_a.checked_add(&funds).ok_or("integer error")?,
-						})
+						}
 					} else {
-						Channel::Funded(ChannelBalance {
+						ChannelBalance {
 							balance: channel_balance.balance.checked_add(&funds).ok_or("integer error")?,
 							balance_a: channel_balance.balance_a,
-						})
+						}
 					}
 				},
 				_ => return Err("Channel is must not be created twice."),
 			};
 
 			// ==== State change ================================
-			<Channels<T>>::insert(channel_id, channel);
+			<Channels<T>>::insert(channel_id, Channel::Funded(channel_balance.clone()));
 			<balances::Module<T> as ReservableCurrency<<T as system::Trait>::AccountId>>::reserve(&sender, funds)?;
+
+			Self::deposit_event(RawEvent::Funded(sender, channel_balance.balance, channel_balance.balance_a));
+
 			Ok(())
 		}
 
@@ -401,6 +411,7 @@ decl_event!(
 		<T as system::Trait>::AccountId,
 		<T as system::Trait>::Hash,
 		<T as balances::Trait>::Balance {
+		Funded(AccountId, Balance, Balance),
 		Opened(Hash, Balance, Balance),
 		InitiatedSettlement(Hash, Balance),
 		OpenedFor(AccountId, AccountId, Balance, Balance),

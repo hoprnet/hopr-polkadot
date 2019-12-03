@@ -13,6 +13,7 @@ use support::{
 	decl_event, decl_module, decl_storage, dispatch::Result, ensure, traits::ReservableCurrency,
 	StorageMap,
 };
+
 use system::ensure_signed;
 
 /// Length of the pending_window in seconds
@@ -77,8 +78,12 @@ decl_storage! {
 		Channels get(channels): map ChannelId<T> => Channel<T::Balance, T::Moment>;
 		States get(state): map T::AccountId => State<T::Hash, Public>;
 		Nonces get(nonce_exists): map T::Hash => bool;
+		PendingWindow get(pending_window) config(): u64 = PENDING_WINDOW;
 	}
 }
+
+// @TODO epochs for reset on-chain secret
+// @TODO increase epoch after initiating settlement
 
 decl_module! {
 	/// Module that process Hopr payments
@@ -317,6 +322,10 @@ decl_module! {
 			Ok(())
 		}
 
+		pub fn redeem_aggregated_tickets() -> Result {
+			Err("Not implemented")
+		}
+
 		/// Restores the channel to a previously agreed backup state.
 		pub fn initiate_recovery(origin, counterparty: T::AccountId, signature: Signature, claimed_channel_balance: ChannelBalance<T::Balance>) -> Result {
 			// ==== Verification ================================
@@ -342,7 +351,7 @@ decl_module! {
 			ensure!(Signature::verify(&signature, message.as_slice(), &counterparty_pubkey), "Signature must be valid.");
 
 			// ==== State change ================================
-			let end_of_pending_window = timestamp::Module::<T>::now().checked_add(&<T::Moment as As<u64>>::sa(PENDING_WINDOW)).ok_or("Integer error")?;
+			let end_of_pending_window = timestamp::Module::<T>::now().checked_add(&<T::Moment as As<u64>>::sa(Self::pending_window())).ok_or("Integer error")?;
 			<Channels<T>>::insert(channel_id, Channel::PendingSettlement(channel_balance.clone(), end_of_pending_window));
 
 			Self::deposit_event(RawEvent::InitiatedSettlement(channel_id, channel_balance.balance_a));
@@ -364,7 +373,7 @@ decl_module! {
 			};
 
 			// ==== State change ================================
-			let end_of_pending_window = timestamp::Module::<T>::now().checked_add(&<T::Moment as As<u64>>::sa(PENDING_WINDOW)).ok_or("Integer error")?;
+			let end_of_pending_window = timestamp::Module::<T>::now().checked_add(&<T::Moment as As<u64>>::sa(Self::pending_window())).ok_or("Integer error")?;
 			<Channels<T>>::insert(channel_id, Channel::PendingSettlement(channel_balance.clone(), end_of_pending_window));
 
 			Self::deposit_event(RawEvent::InitiatedSettlement(channel_id, channel_balance.balance_a));
@@ -928,7 +937,7 @@ mod tests {
 			);
 
 			let timestamp = timestamp::Module::<HoprTest>::now()
-				.checked_add(PENDING_WINDOW)
+				.checked_add(Hopr::pending_window())
 				.unwrap();
 			assert_eq!(
 				Hopr::channels(channel_id.clone()),
@@ -1108,7 +1117,7 @@ mod tests {
 			));
 
 			let timestamp = timestamp::Module::<HoprTest>::now()
-				.checked_add(PENDING_WINDOW)
+				.checked_add(Hopr::pending_window())
 				.unwrap();
 			assert_eq!(
 				Hopr::channels(channel_id.clone()),

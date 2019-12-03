@@ -33,7 +33,7 @@ cargo build
 
 # Testing
 
-You can run the unit test with:
+You can run the unit tests with:
 
 ```bash
 cargo test -p hopr-polkadot-runtime

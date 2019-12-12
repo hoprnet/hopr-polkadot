@@ -46,7 +46,8 @@ impl Alternative {
 				|| testnet_genesis(vec![
 					authority_key("Alice")
 				], vec![
-					account_key("Alice")
+					account_key("Alice"),
+					account_key("Bob")
 				],
 					account_key("Alice")
 				),

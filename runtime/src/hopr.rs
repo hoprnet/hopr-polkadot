@@ -1,5 +1,8 @@
 use parity_codec::{Decode, Encode};
-use primitives::sr25519::{Public, Signature};
+use primitives::{
+	sr25519::{Public, Signature},
+	H256,
+};
 use runtime_primitives::traits::{As, CheckedAdd, CheckedSub, Hash, Verify};
 /// A runtime module template with necessary imports
 
@@ -78,7 +81,7 @@ decl_storage! {
 		Channels get(channels): map ChannelId<T> => Channel<T::Balance, T::Moment>;
 		States get(state): map T::AccountId => State<T::Hash, Public>;
 		Nonces get(nonce_exists): map T::Hash => bool;
-		PendingWindow get(pending_window) config(): u64 = PENDING_WINDOW;
+		PendingWindow get(pending_window): u64 = PENDING_WINDOW;
 	}
 }
 
@@ -233,7 +236,7 @@ decl_module! {
 		}
 
 		/// Initialises the stored on-chain data.
-		pub fn init(origin, pubkey: Public, hash: T::Hash) -> Result {
+		pub fn init(origin, pubkey: H256, hash: T::Hash) -> Result {
 			// ==== Verification ================================
 			let sender = ensure_signed(origin)?;
 
@@ -241,7 +244,7 @@ decl_module! {
 
 			// ==== State change ================================
 			<States<T>>::insert(&sender, State {
-				pubkey,
+				pubkey: Public::from_raw(*pubkey.as_fixed_bytes()),
 				secret: hash,
 			});
 
@@ -313,7 +316,10 @@ decl_module! {
 			<Channels<T>>::mutate(&channel_id, |channel| {
 				*channel = match channel {
 					Channel::Active(_) => Channel::Active(channel_balance),
-					Channel::PendingSettlement(_, timestamp) => Channel::PendingSettlement(channel_balance, timestamp.clone()),
+					Channel::PendingSettlement(_, timestamp) => {
+						Self::deposit_event(RawEvent::PushedBackSettlement(channel_id, channel_balance.balance_a));
+						Channel::PendingSettlement(channel_balance, timestamp.clone())
+					},
 					_ => return Err("Channel does not exist and/or its state does not fit."),
 				};
 				Ok(())
@@ -423,6 +429,7 @@ decl_event!(
 		Funded(AccountId, Balance, Balance),
 		Opened(Hash, Balance, Balance),
 		InitiatedSettlement(Hash, Balance),
+		PushedBackSettlement(Hash, Balance),
 		OpenedFor(AccountId, AccountId, Balance, Balance),
 	}
 );
@@ -572,16 +579,26 @@ mod tests {
 			let account_id = account_key("Alice");
 			let sender = Origin::signed(account_id.clone());
 
+			let hashed_secret = <Blake2Hasher as Hasher>::hash(&PRE_IMAGE);
+
 			assert_ok!(Hopr::init(
 				sender.clone(),
-				account_id.clone(),
-				<Blake2Hasher as Hasher>::hash(&PRE_IMAGE)
+				account_id.clone().into(),
+				hashed_secret.clone()
 			));
+
+			assert_eq!(
+				Hopr::state(account_id.clone()),
+				State {
+					pubkey: account_id.clone(),
+					secret: hashed_secret
+				}
+			);
 
 			assert_noop!(
 				Hopr::init(
 					sender.clone(),
-					account_id.clone(),
+					account_id.into(),
 					<Blake2Hasher as Hasher>::hash(&PRE_IMAGE)
 				),
 				"State must be set at most once."
@@ -603,7 +620,11 @@ mod tests {
 				"Call init() before setting a new on-chain secret."
 			);
 
-			assert_ok!(Hopr::init(sender.clone(), account_id, first_hash.clone()));
+			assert_ok!(Hopr::init(
+				sender.clone(),
+				account_id.into(),
+				first_hash.clone()
+			));
 
 			assert_ok!(Hopr::set_secret(sender.clone(), second_hash.clone()));
 
@@ -639,12 +660,12 @@ mod tests {
 
 			assert_ok!(Hopr::init(
 				sender.clone(),
-				account_id.clone(),
+				account_id.clone().into(),
 				<Blake2Hasher as Hasher>::hash(&PRE_IMAGE)
 			));
 			assert_ok!(Hopr::init(
 				counterparty.clone(),
-				account_id_counterparty.clone(),
+				account_id_counterparty.clone().into(),
 				<Blake2Hasher as Hasher>::hash(&PRE_IMAGE)
 			));
 
@@ -717,12 +738,12 @@ mod tests {
 
 			assert_ok!(Hopr::init(
 				sender.clone(),
-				account_id.clone(),
+				account_id.clone().into(),
 				<Blake2Hasher as Hasher>::hash(&PRE_IMAGE)
 			));
 			assert_ok!(Hopr::init(
 				counterparty.clone(),
-				account_id_counterparty.clone(),
+				account_id_counterparty.clone().into(),
 				<Blake2Hasher as Hasher>::hash(&PRE_IMAGE)
 			));
 			let channel_balance: ChannelBalance<u128> = ChannelBalance {
@@ -811,12 +832,12 @@ mod tests {
 
 			assert_ok!(Hopr::init(
 				sender.clone(),
-				account_id.clone(),
+				account_id.clone().into(),
 				<Blake2Hasher as Hasher>::hash(&PRE_IMAGE)
 			));
 			assert_ok!(Hopr::init(
 				counterparty.clone(),
-				account_id_counterparty.clone(),
+				account_id_counterparty.clone().into(),
 				<Blake2Hasher as Hasher>::hash(&PRE_IMAGE)
 			));
 
@@ -882,12 +903,12 @@ mod tests {
 
 			assert_ok!(Hopr::init(
 				sender.clone(),
-				account_id.clone(),
+				account_id.clone().into(),
 				<Blake2Hasher as Hasher>::hash(&PRE_IMAGE)
 			));
 			assert_ok!(Hopr::init(
 				counterparty.clone(),
-				account_id_counterparty.clone(),
+				account_id_counterparty.clone().into(),
 				<Blake2Hasher as Hasher>::hash(&PRE_IMAGE)
 			));
 
@@ -979,7 +1000,7 @@ mod tests {
 
 			assert_ok!(Hopr::init(
 				sender.clone(),
-				account_id.clone(),
+				account_id.clone().into(),
 				<Blake2Hasher as Hasher>::hash(&PRE_IMAGE)
 			));
 
@@ -987,7 +1008,7 @@ mod tests {
 				<Blake2Hasher as Hasher>::hash(<Blake2Hasher as Hasher>::hash(&PRE_IMAGE).as_ref());
 			assert_ok!(Hopr::init(
 				counterparty.clone(),
-				account_id_counterparty.clone(),
+				account_id_counterparty.clone().into(),
 				counterparty_on_chain_secret
 			));
 

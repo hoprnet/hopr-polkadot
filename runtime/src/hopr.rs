@@ -73,7 +73,7 @@ pub type PreImage<T> = <T as system::Trait>::Hash;
 /// The module's configuration trait.
 pub trait Trait: system::Trait + timestamp::Trait + balances::Trait {
 	type Event: From<Event<Self>> + Into<<Self as system::Trait>::Event>;
-	// type AccountId: AsRef<[u8; 32]>;
+	// type AccountId: From<<Self as Trait>::AccountId> + Into<<Self as system::Trait>::AccountId> + From<<Self as system::Trait>::AccountId> + Into<Public>;
 }
 
 decl_storage! {
@@ -426,10 +426,15 @@ decl_event!(
 		<T as system::Trait>::AccountId,
 		<T as system::Trait>::Hash,
 		<T as balances::Trait>::Balance {
+		/// Channel got funded.
 		Funded(AccountId, Balance, Balance),
+		/// Channel is now open.
 		Opened(Hash, Balance, Balance),
+		/// Settlement was initiated.
 		InitiatedSettlement(Hash, Balance),
+		/// Settlement was delayed.
 		PushedBackSettlement(Hash, Balance),
+		/// Payment channel opened by third party.
 		OpenedFor(AccountId, AccountId, Balance, Balance),
 	}
 );

@@ -20,7 +20,7 @@ use support::{
 use system::ensure_signed;
 
 /// Length of the pending_window in seconds
-const PENDING_WINDOW: u64 = 1 * 60;
+const PENDING_WINDOW: u64 = 1 * 10;
 
 #[derive(Clone, PartialEq, Encode, Decode)]
 #[cfg_attr(feature = "std", derive(Debug))]
@@ -358,7 +358,9 @@ decl_module! {
 
 			// ==== State change ================================
 			let end_of_pending_window = timestamp::Module::<T>::now().checked_add(&<T::Moment as As<u64>>::sa(Self::pending_window())).ok_or("Integer error")?;
-			<Channels<T>>::insert(channel_id, Channel::PendingSettlement(channel_balance.clone(), end_of_pending_window));
+			<Channels<T>>::mutate(&channel_id, |channel| {
+				*channel = Channel::PendingSettlement(channel_balance.clone(), end_of_pending_window);
+			});
 
 			Self::deposit_event(RawEvent::InitiatedSettlement(channel_id, channel_balance.balance_a));
 

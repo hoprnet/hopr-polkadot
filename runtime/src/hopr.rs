@@ -166,6 +166,8 @@ decl_module! {
 			};
 
 			let counterparty_pubkey = Self::state(counterparty).pubkey;
+			// println!("{:?}", counterparty_pubkey);
+			// println!("{:?}", (Channel::Funded(channel_balance.clone()) as Channel<T::Balance, T::Moment>).encode().as_slice());
 			ensure!(Signature::verify(&signature, (Channel::Funded(channel_balance.clone()) as Channel<T::Balance, T::Moment>).encode().as_slice(), &counterparty_pubkey), "Invalid signature.");
 
 			// ==== State change ================================
@@ -576,6 +578,11 @@ mod tests {
 			.public()
 	}
 
+	fn my_account_key(seed: [u8; 32]) -> AccountId {
+		println!("{:?}", sr25519::Pair::from_seed(seed).public());
+		sr25519::Pair::from_seed(seed).public()
+	}
+
 	fn key(s: &str) -> sr25519::Pair {
 		sr25519::Pair::from_string(&format!("//{}", s), None).expect("static values are valid; qed")
 	}
@@ -583,7 +590,10 @@ mod tests {
 	#[test]
 	fn verify_init() {
 		with_externalities(&mut new_test_ext(), || {
-			let account_id = account_key("Alice");
+			let account_id = my_account_key([
+				179, 250, 241, 51, 4, 74, 235, 236, 189, 136, 113, 169, 32, 129, 135, 131, 248,
+				227, 232, 9, 164, 37, 241, 49, 4, 100, 146, 146, 81, 16, 235, 192,
+			]);
 			let sender = Origin::signed(account_id.clone());
 
 			let hashed_secret = <Blake2Hasher as Hasher>::hash(&PRE_IMAGE);

@@ -135,7 +135,7 @@ decl_module! {
 						}
 					}
 				},
-				_ => return Err("Channel is must not be created twice."),
+				_ => return Err("Channel must not be created twice."),
 			};
 
 			// ==== State change ================================

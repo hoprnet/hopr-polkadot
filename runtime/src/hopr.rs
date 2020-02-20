@@ -888,7 +888,7 @@ mod tests {
 
 			assert_noop!(
 				Hopr::create(sender.clone(), 1, account_id_counterparty.clone()),
-				"Channel is must not be created twice."
+				"Channel must not be created twice."
 			);
 
 			assert_eq!(

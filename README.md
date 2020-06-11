@@ -4,9 +4,9 @@ HOPR is a privacy-preserving messaging protocol that incentivizes users to parti
 
 ## hopr-polkadot
 
-A SRML module whose purpose is to process payments of **[HOPR.network](https://hopr.network)** as a parachain of Polkadot.
+A SRML module whose purpose is to process payments of **[HOPRnet](https://hoprnet.io)** as a parachain of Polkadot.
 
-For more details about **[HOPR.network](https://hopr.network)** and its integration into the Polkadot ecosystem, see a more detailed description [here](https://github.com/validitylabs/HOPR-PL-Substrate/blob/master/README.md).
+For more details about **[HOPRnet](https://hoprnet.io)** and its integration into the Polkadot ecosystem.
 
 ## Building
 
